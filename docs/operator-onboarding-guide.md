@@ -56,19 +56,34 @@ spec:
   description: |
     Software-only test deployment of my-operator.
 
-  # The pipeline waits for these resources to become Ready
-  # before running certsuite.
+  # The pipeline verifies these resources before running certsuite.
+  # Deployment, StatefulSet, DaemonSet: rollout readiness (waits for pods).
+  # Any other kind: presence check (verifies the resource exists).
   readiness:
-    timeout: 300                   # Seconds to wait for operands
+    timeout: 300                   # Seconds to wait
     checks:
       - kind: Deployment
         name: my-controller
       - kind: DaemonSet
         name: my-agent
+      - kind: MyCustomResource     # Presence check only
+        name: test-instance
 ```
 
 The operator's package name and channel are **not** specified here --
 Konflux determines those from the FBC fragment in the Snapshot.
+
+### Supported Check Types
+
+| Kind | Behavior |
+|------|----------|
+| `Deployment` | Waits for rollout to complete (all pods Ready) |
+| `StatefulSet` | Waits for rollout to complete |
+| `DaemonSet` | Waits for rollout to complete |
+| Any other kind | Verifies the resource exists (namespace-scoped first, then cluster-scoped) |
+
+If no `readiness.checks` are defined, the pipeline auto-discovers all
+Deployments in the target namespace and waits for them.
 
 ## Step 2: Create Operand Manifests
 

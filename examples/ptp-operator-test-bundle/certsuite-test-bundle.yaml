@@ -18,7 +18,13 @@ spec:
   readiness:
     timeout: 300
     checks:
+      # Rollout readiness (waits for pods to be Running)
       - kind: Deployment
         name: ptp-operator-controller-manager
       - kind: DaemonSet
         name: linuxptp-daemon
+      # Presence checks (verifies the resource exists)
+      - kind: PtpConfig
+        name: test-software-only
+      - kind: PtpOperatorConfig
+        name: default
