@@ -1,0 +1,186 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: deploy-fbc-operator
+  labels:
+    app.kubernetes.io/part-of: konflux-certsuite
+spec:
+  description: |
+    Deploys an OLM-managed operator from an FBC fragment onto the shared
+    cluster. Creates Namespace, OperatorGroup, CatalogSource, and
+    Subscription, then waits for the CSV to reach Succeeded phase.
+  params:
+    - name: FBC_FRAGMENT
+      type: string
+      description: Container image of the FBC fragment
+    - name: BUNDLE_IMAGE
+      type: string
+      description: Unreleased bundle image
+    - name: PACKAGE_NAME
+      type: string
+    - name: CHANNEL_NAME
+      type: string
+  results:
+    - name: installNamespace
+      description: Namespace where the operator was installed
+    - name: catalogSourceName
+      description: Name of the created CatalogSource
+    - name: subscriptionName
+      description: Name of the created Subscription
+    - name: csvName
+      description: Name of the installed CSV
+  workspaces:
+    - name: shared
+      description: Shared workspace for passing data between tasks
+  steps:
+    - name: deploy
+      image: quay.io/konflux-ci/konflux-test:v1.4.31@sha256:a7cae9e96663e277a3904d0c78630508ddb6cc8eebaa912a840bd20f68dcaad1
+      workingDir: $(workspaces.shared.path)
+      env:
+        - name: FBC_FRAGMENT
+          value: "$(params.FBC_FRAGMENT)"
+        - name: BUNDLE_IMAGE
+          value: "$(params.BUNDLE_IMAGE)"
+        - name: PACKAGE_NAME
+          value: "$(params.PACKAGE_NAME)"
+        - name: CHANNEL_NAME
+          value: "$(params.CHANNEL_NAME)"
+        - name: ARTIFACT_DIR
+          value: "$(workspaces.shared.path)/konflux-artifacts"
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        mkdir -p "${ARTIFACT_DIR}"
+
+        echo "[$(date -u +%FT%T.%3NZ)] Deploying operator: package=${PACKAGE_NAME} channel=${CHANNEL_NAME}"
+        oc whoami || { echo "ERROR: Cannot connect to cluster"; exit 1; }
+
+        if ! bundle_render_out=$(opm render "${BUNDLE_IMAGE}"); then
+          echo "ERROR: Failed to render bundle image" >&2
+          exit 1
+        fi
+
+        # Determine install namespace
+        INSTALL_NAMESPACE=$(echo "${bundle_render_out}" | \
+          jq -r 'select(.schema == "olm.bundle") | .properties[]? |
+          select(.type == "olm.bundle.object") | .value.data' 2>/dev/null | \
+          base64 -d 2>/dev/null | \
+          jq -r 'select(.kind == "ClusterServiceVersion") |
+          .metadata.annotations["operatorframework.io/suggested-namespace"] // empty' 2>/dev/null | \
+          head -1)
+
+        if [[ -z "${INSTALL_NAMESPACE}" || "${INSTALL_NAMESPACE}" == "null" ]]; then
+          INSTALL_NAMESPACE=$(oc create -f - -o jsonpath='{.metadata.name}' <<NS
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          generateName: oo-
+        NS
+          )
+        elif ! oc get namespace "${INSTALL_NAMESPACE}" &>/dev/null; then
+          oc create namespace "${INSTALL_NAMESPACE}"
+        fi
+
+        echo "[$(date -u +%FT%T.%3NZ)] Namespace: ${INSTALL_NAMESPACE}"
+        echo -n "${INSTALL_NAMESPACE}" > "$(results.installNamespace.path)"
+
+        # Determine install mode
+        TARGET_NS=""
+        MODES=$(echo "${bundle_render_out}" | jq -r '
+          select(.schema == "olm.bundle") | .properties[]? |
+          select(.type == "olm.bundle.object") | .value.data' 2>/dev/null | \
+          base64 -d 2>/dev/null | jq -r '
+          select(.kind == "ClusterServiceVersion") |
+          .spec.installModes[] | select(.supported == true) | .type' 2>/dev/null || echo "AllNamespaces")
+
+        if echo "${MODES}" | grep -q "AllNamespaces"; then
+          TARGET_NS=""
+        elif echo "${MODES}" | grep -q "OwnNamespace"; then
+          TARGET_NS="${INSTALL_NAMESPACE}"
+        fi
+
+        # OperatorGroup
+        EXISTING_OG=$(oc -n "${INSTALL_NAMESPACE}" get operatorgroup -o jsonpath="{.items[*].metadata.name}" 2>/dev/null || true)
+        if [[ -z "${EXISTING_OG}" ]]; then
+          OG_OP=create
+          OG_META="generateName: oo-"
+        else
+          OG_OP=apply
+          OG_META="name: ${EXISTING_OG}"
+        fi
+
+        OG=$(oc ${OG_OP} -f - -o jsonpath='{.metadata.name}' <<OG_EOF
+        apiVersion: operators.coreos.com/v1
+        kind: OperatorGroup
+        metadata:
+          ${OG_META}
+          namespace: ${INSTALL_NAMESPACE}
+        spec:
+          targetNamespaces: [${TARGET_NS:+\"${TARGET_NS}\"}]
+        OG_EOF
+        )
+
+        # CatalogSource
+        CATSRC=$(oc create -f - -o jsonpath='{.metadata.name}' <<CS_EOF
+        apiVersion: operators.coreos.com/v1alpha1
+        kind: CatalogSource
+        metadata:
+          generateName: oo-
+          namespace: ${INSTALL_NAMESPACE}
+        spec:
+          sourceType: grpc
+          image: ${FBC_FRAGMENT}
+          displayName: "Certsuite Test Catalog"
+          publisher: "konflux-certsuite"
+        CS_EOF
+        )
+        echo -n "${CATSRC}" > "$(results.catalogSourceName.path)"
+
+        # Wait for CatalogSource
+        for i in $(seq 1 60); do
+          STATE=$(oc get catalogsource "${CATSRC}" -n "${INSTALL_NAMESPACE}" \
+            -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null || echo "")
+          [[ "${STATE}" == "READY" ]] && break
+          [[ ${i} -eq 60 ]] && { echo "ERROR: CatalogSource not ready"; exit 1; }
+          sleep 10
+        done
+
+        # Bundle name & Subscription
+        BUNDLE_NAME=$(echo "${bundle_render_out}" | jq -r 'select(.schema == "olm.bundle") | .name' | head -1)
+
+        SUB=$(oc create -f - -o jsonpath='{.metadata.name}' <<SUB_EOF
+        apiVersion: operators.coreos.com/v1alpha1
+        kind: Subscription
+        metadata:
+          generateName: oo-
+          namespace: ${INSTALL_NAMESPACE}
+        spec:
+          channel: ${CHANNEL_NAME}
+          installPlanApproval: Automatic
+          name: ${PACKAGE_NAME}
+          source: ${CATSRC}
+          sourceNamespace: ${INSTALL_NAMESPACE}
+          startingCSV: ${BUNDLE_NAME}
+        SUB_EOF
+        )
+        echo -n "${SUB}" > "$(results.subscriptionName.path)"
+
+        # Wait for CSV
+        for i in $(seq 1 90); do
+          CSV=$(oc get subscription "${SUB}" -n "${INSTALL_NAMESPACE}" \
+            -o jsonpath='{.status.installedCSV}' 2>/dev/null || echo "")
+          if [[ -n "${CSV}" ]]; then
+            PHASE=$(oc get csv "${CSV}" -n "${INSTALL_NAMESPACE}" \
+              -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+            if [[ "${PHASE}" == "Succeeded" ]]; then
+              echo "[$(date -u +%FT%T.%3NZ)] CSV '${CSV}' ready"
+              echo -n "${CSV}" > "$(results.csvName.path)"
+              exit 0
+            fi
+          fi
+          sleep 10
+        done
+
+        echo "ERROR: Timed out waiting for CSV" >&2
+        exit 1

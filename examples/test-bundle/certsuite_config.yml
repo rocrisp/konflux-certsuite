@@ -1,0 +1,16 @@
+# Certsuite configuration for the example operator test bundle.
+# See https://redhat-best-practices-for-k8s.github.io/certsuite/configuration/
+targetNameSpaces:
+  - name: ""  # Filled in automatically by the pipeline
+
+podsUnderTestLabels:
+  - "redhat-best-practices-for-k8s.com/generic: target"
+
+# Uncomment and configure if the operator has OLM-managed CSVs to test
+# operatorsUnderTestLabels:
+#   - "redhat-best-practices-for-k8s.com/operator: target"
+
+# CRD filters -- update with your operator's CRD suffixes
+# targetCrdFilters:
+#   - nameSuffix: "example.com"
+#     scalable: false

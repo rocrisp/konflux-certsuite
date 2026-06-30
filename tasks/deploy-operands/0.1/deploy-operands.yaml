@@ -1,0 +1,121 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: deploy-operands
+  labels:
+    app.kubernetes.io/part-of: konflux-certsuite
+spec:
+  description: |
+    Fetches the certsuite test bundle from a git repository and deploys
+    operand manifests onto the target cluster. The test bundle defines
+    software-only operand instances that exercise the full operator scope
+    without hardware or license dependencies.
+  params:
+    - name: TEST_BUNDLE_REF
+      type: string
+      description: |
+        Git URL with optional path fragment, e.g.
+        https://github.com/org/repo.git#path/to/test-bundle
+    - name: INSTALL_NAMESPACE
+      type: string
+      description: Namespace where the operator is installed
+    - name: READINESS_TIMEOUT
+      type: string
+      default: "300"
+  results:
+    - name: operandNamespace
+      description: Namespace where operands were deployed
+  workspaces:
+    - name: shared
+      description: Shared workspace for passing data between tasks
+  steps:
+    - name: fetch-bundle
+      image: quay.io/openshift/origin-cli:latest
+      workingDir: $(workspaces.shared.path)
+      env:
+        - name: TEST_BUNDLE_REF
+          value: "$(params.TEST_BUNDLE_REF)"
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        BUNDLE_DIR="$(workspaces.shared.path)/test-bundle"
+        mkdir -p "${BUNDLE_DIR}"
+
+        # Parse ref: support git URL with #path fragment
+        GIT_URL="${TEST_BUNDLE_REF%%#*}"
+        BUNDLE_PATH="${TEST_BUNDLE_REF#*#}"
+        [[ "${BUNDLE_PATH}" == "${TEST_BUNDLE_REF}" ]] && BUNDLE_PATH="."
+
+        echo "[$(date -u +%FT%T.%3NZ)] Cloning ${GIT_URL} (path: ${BUNDLE_PATH})"
+
+        CLONE_DIR=$(mktemp -d)
+        git clone --depth 1 "${GIT_URL}" "${CLONE_DIR}"
+
+        cp -r "${CLONE_DIR}/${BUNDLE_PATH}/." "${BUNDLE_DIR}/"
+        rm -rf "${CLONE_DIR}"
+
+        echo "[$(date -u +%FT%T.%3NZ)] Bundle contents:"
+        ls -la "${BUNDLE_DIR}/"
+    - name: deploy
+      image: quay.io/openshift/origin-cli:latest
+      workingDir: $(workspaces.shared.path)
+      env:
+        - name: INSTALL_NAMESPACE
+          value: "$(params.INSTALL_NAMESPACE)"
+        - name: READINESS_TIMEOUT
+          value: "$(params.READINESS_TIMEOUT)"
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        BUNDLE_DIR="$(workspaces.shared.path)/test-bundle"
+
+        if [[ ! -f "${BUNDLE_DIR}/certsuite-test-bundle.yaml" ]]; then
+          echo "ERROR: certsuite-test-bundle.yaml not found" >&2
+          exit 1
+        fi
+
+        # Determine target namespace
+        if command -v yq &>/dev/null; then
+          TARGET_NS=$(yq e '.spec.namespace // ""' "${BUNDLE_DIR}/certsuite-test-bundle.yaml")
+        else
+          TARGET_NS=$(grep -A1 'namespace:' "${BUNDLE_DIR}/certsuite-test-bundle.yaml" | tail -1 | awk '{print $NF}' || echo "")
+        fi
+        TARGET_NS="${TARGET_NS:-${INSTALL_NAMESPACE}}"
+
+        echo "[$(date -u +%FT%T.%3NZ)] Deploying operands to namespace: ${TARGET_NS}"
+
+        if [[ "${TARGET_NS}" != "${INSTALL_NAMESPACE}" ]]; then
+          oc create namespace "${TARGET_NS}" 2>/dev/null || true
+        fi
+
+        # Apply prerequisites
+        if [[ -d "${BUNDLE_DIR}/prerequisites" ]]; then
+          echo "[$(date -u +%FT%T.%3NZ)] Applying prerequisites..."
+          oc apply -n "${TARGET_NS}" -f "${BUNDLE_DIR}/prerequisites/" || true
+        fi
+
+        # Apply operands
+        if [[ -d "${BUNDLE_DIR}/operands" ]]; then
+          echo "[$(date -u +%FT%T.%3NZ)] Applying operand manifests..."
+          oc apply -n "${TARGET_NS}" -f "${BUNDLE_DIR}/operands/"
+        else
+          echo "ERROR: operands/ directory not found" >&2
+          exit 1
+        fi
+
+        # Wait for Deployments
+        DEPS=$(oc get deployments -n "${TARGET_NS}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+        for DEP in ${DEPS}; do
+          echo "  Waiting for deployment/${DEP}..."
+          oc rollout status "deployment/${DEP}" -n "${TARGET_NS}" --timeout="${READINESS_TIMEOUT}s" || true
+        done
+
+        # Copy certsuite config
+        if [[ -f "${BUNDLE_DIR}/certsuite_config.yml" ]]; then
+          cp "${BUNDLE_DIR}/certsuite_config.yml" "$(workspaces.shared.path)/certsuite_config.yml"
+        fi
+
+        echo -n "${TARGET_NS}" > "$(results.operandNamespace.path)"
+        echo "[$(date -u +%FT%T.%3NZ)] Operand deployment complete"

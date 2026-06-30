@@ -1,0 +1,86 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-certsuite
+  labels:
+    app.kubernetes.io/part-of: konflux-certsuite
+spec:
+  description: |
+    Runs the Red Hat Best Practices Test Suite for Kubernetes (certsuite)
+    against the deployed operator. Iterates over comma-separated test
+    labels and produces a claim.json for each suite.
+  params:
+    - name: CERTSUITE_LABELS
+      type: string
+      description: Comma-separated certsuite test labels (e.g. "networking,lifecycle")
+    - name: CERTSUITE_IMAGE
+      type: string
+      default: "quay.io/redhat-best-practices-for-k8s/certsuite:latest"
+  workspaces:
+    - name: shared
+      description: Shared workspace containing certsuite_config.yml and kubeconfig
+  steps:
+    - name: run
+      image: "$(params.CERTSUITE_IMAGE)"
+      onError: continue
+      workingDir: $(workspaces.shared.path)
+      computeResources:
+        limits:
+          memory: 4Gi
+        requests:
+          memory: 2Gi
+          cpu: 500m
+      env:
+        - name: CERTSUITE_LABELS
+          value: "$(params.CERTSUITE_LABELS)"
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        RESULTS_DIR="$(workspaces.shared.path)/results"
+        CONFIG_FILE="$(workspaces.shared.path)/certsuite_config.yml"
+
+        mkdir -p "${RESULTS_DIR}"
+
+        if [[ ! -f "${CONFIG_FILE}" ]]; then
+          echo "ERROR: certsuite_config.yml not found at ${CONFIG_FILE}" >&2
+          exit 1
+        fi
+
+        IFS=',' read -ra LABELS <<< "${CERTSUITE_LABELS}"
+        OVERALL_EXIT=0
+
+        for LABEL in "${LABELS[@]}"; do
+          LABEL=$(echo "${LABEL}" | xargs)
+          SUITE_DIR="${RESULTS_DIR}/${LABEL}"
+          mkdir -p "${SUITE_DIR}"
+
+          echo ""
+          echo "================================================================"
+          echo "[$(date -u +%FT%T.%3NZ)] Running: ${LABEL}"
+          echo "================================================================"
+
+          set +e
+          certsuite run \
+            --label-filter "${LABEL}" \
+            --output-dir "${SUITE_DIR}" \
+            --config-file "${CONFIG_FILE}" \
+            2>&1 | tee "${SUITE_DIR}/certsuite.log"
+          RC=$?
+          set -e
+
+          if [[ ${RC} -ne 0 ]]; then
+            echo "[$(date -u +%FT%T.%3NZ)] WARNING: '${LABEL}' exit code ${RC}"
+            OVERALL_EXIT=1
+          fi
+
+          if [[ -f "${SUITE_DIR}/claim.json" ]]; then
+            TOTAL=$(jq '.claim.results | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
+            PASSED=$(jq '[.claim.results[] | select(.state == "passed")] | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
+            FAILED=$(jq '[.claim.results[] | select(.state == "failed")] | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
+            echo "[$(date -u +%FT%T.%3NZ)] total=${TOTAL} passed=${PASSED} failed=${FAILED}"
+          fi
+        done
+
+        echo "[$(date -u +%FT%T.%3NZ)] All suites complete (exit: ${OVERALL_EXIT})"
+        exit ${OVERALL_EXIT}
