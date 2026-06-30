@@ -1,0 +1,366 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: certsuite-operator-test
+  labels:
+    app.kubernetes.io/part-of: konflux-certsuite
+    upstream-usable: "true"
+spec:
+  description: |
+    Deploys an operator from an FBC fragment onto a shared OpenShift cluster,
+    deploys operands from a certsuite test bundle, runs parameterized certsuite
+    test suites, and pushes results to cert-track-results and an OCI registry.
+
+    The pipeline uses Lease-based locking to serialize access to the shared
+    cluster and OADP backup/restore to revert cluster state between runs.
+  params:
+    - name: SNAPSHOT
+      type: string
+      description: Konflux ApplicationSnapshot JSON
+    - name: KUBECONFIG_SECRET_NAME
+      type: string
+      description: K8s Secret holding the shared cluster kubeconfig
+    - name: KUBECONFIG_SECRET_KEY
+      type: string
+      default: "kubeconfig"
+    - name: TEST_BUNDLE_REF
+      type: string
+      description: |
+        Git URL (with optional #path fragment) or OCI ref pointing to the
+        operator's certsuite test bundle.
+    - name: CERTSUITE_LABELS
+      type: string
+      default: ""
+      description: |
+        Comma-separated certsuite test labels (e.g. "networking,lifecycle").
+        When empty, all certsuite tests are run.
+    - name: OADP_BACKUP_NAME
+      type: string
+      description: OADP Backup name to restore from
+    - name: OADP_NAMESPACE
+      type: string
+      default: "openshift-adp"
+    - name: PACKAGE_NAME
+      type: string
+      default: ""
+    - name: CHANNEL_NAME
+      type: string
+      default: ""
+    - name: LOCK_TIMEOUT
+      type: string
+      default: "1800"
+    - name: LOCK_NAME
+      type: string
+      default: "certsuite-cluster-lock"
+    - name: CREDENTIALS_SECRET_NAME
+      type: string
+      description: Secret for OCI registry credentials
+    - name: OCI_REF
+      type: string
+      description: OCI artifact reference for results
+    - name: CERT_TRACK_URL
+      type: string
+      description: Base URL of the cert-track-results instance
+    - name: CERT_TRACK_SECRET_NAME
+      type: string
+      description: Secret containing the cert-track API token
+    - name: CERT_TRACK_SECRET_KEY
+      type: string
+      default: "api-token"
+
+  workspaces:
+    - name: shared
+      description: Shared workspace for inter-task data
+
+  tasks:
+    # ── 1. Parse Snapshot Metadata ──────────────────────────────────────
+    - name: parse-metadata
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/konflux-ci/integration-examples
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/test_metadata.yaml
+      params:
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+
+    # ── 2. Get Unreleased Bundle from FBC ──────────────────────────────
+    - name: get-unreleased-bundle
+      runAfter:
+        - parse-metadata
+      when:
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskSpec:
+        results:
+          - name: unreleasedBundle
+          - name: packageName
+            value: "$(steps.get-bundle.results.packageName)"
+          - name: channelName
+            value: "$(steps.get-bundle.results.channelName)"
+        steps:
+          - name: get-bundle
+            computeResources:
+              limits:
+                memory: 8Gi
+              requests:
+                memory: 8Gi
+                cpu: "1"
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/tekton-integration-catalog.git
+                - name: revision
+                  value: main
+                - name: pathInRepo
+                  value: stepactions/bundles/get-unreleased-bundle/0.1/get-unreleased-bundle.yaml
+            params:
+              - name: fbcFragment
+                value: "$(tasks.parse-metadata.results.component-container-image)"
+              - name: packageName
+                value: $(params.PACKAGE_NAME)
+              - name: channelName
+                value: $(params.CHANNEL_NAME)
+
+    # ── 3. Acquire Cluster Lock ────────────────────────────────────────
+    - name: acquire-cluster-lock
+      runAfter:
+        - get-unreleased-bundle
+      when:
+        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+          operator: notin
+          values: [""]
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/acquire-cluster-lock/0.1/acquire-cluster-lock.yaml
+      params:
+        - name: LOCK_NAME
+          value: $(params.LOCK_NAME)
+        - name: OWNER
+          value: $(context.pipelineRun.name)
+        - name: LOCK_TIMEOUT
+          value: $(params.LOCK_TIMEOUT)
+
+    # ── 4. OADP Restore (pre-test baseline) ────────────────────────────
+    - name: oadp-restore-pre
+      runAfter:
+        - acquire-cluster-lock
+      when:
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/oadp-restore/0.1/oadp-restore.yaml
+      params:
+        - name: BACKUP_NAME
+          value: $(params.OADP_BACKUP_NAME)
+        - name: OADP_NAMESPACE
+          value: $(params.OADP_NAMESPACE)
+        - name: RESTORE_SUFFIX
+          value: "pre-$(context.pipelineRun.uid)"
+
+    # ── 5. Deploy Operator via OLM ─────────────────────────────────────
+    - name: deploy-operator
+      runAfter:
+        - oadp-restore-pre
+      when:
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/deploy-fbc-operator/0.1/deploy-fbc-operator.yaml
+      params:
+        - name: FBC_FRAGMENT
+          value: "$(tasks.parse-metadata.results.component-container-image)"
+        - name: BUNDLE_IMAGE
+          value: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+        - name: PACKAGE_NAME
+          value: "$(tasks.get-unreleased-bundle.results.packageName)"
+        - name: CHANNEL_NAME
+          value: "$(tasks.get-unreleased-bundle.results.channelName)"
+      workspaces:
+        - name: shared
+          workspace: shared
+
+    # ── 6. Deploy Operands from Test Bundle ────────────────────────────
+    - name: deploy-operands
+      runAfter:
+        - deploy-operator
+      when:
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/deploy-operands/0.1/deploy-operands.yaml
+      params:
+        - name: TEST_BUNDLE_REF
+          value: $(params.TEST_BUNDLE_REF)
+        - name: INSTALL_NAMESPACE
+          value: "$(tasks.deploy-operator.results.installNamespace)"
+      workspaces:
+        - name: shared
+          workspace: shared
+
+    # ── 7. Run Certsuite ───────────────────────────────────────────────
+    - name: run-certsuite
+      runAfter:
+        - deploy-operands
+      when:
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/run-certsuite/0.1/run-certsuite.yaml
+      params:
+        - name: CERTSUITE_LABELS
+          value: $(params.CERTSUITE_LABELS)
+      workspaces:
+        - name: shared
+          workspace: shared
+
+    # ── 8. Collect and Push Results ────────────────────────────────────
+    - name: collect-results
+      runAfter:
+        - run-certsuite
+      when:
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/collect-results/0.1/collect-results.yaml
+      params:
+        - name: CERT_TRACK_URL
+          value: $(params.CERT_TRACK_URL)
+        - name: CERT_TRACK_SECRET_NAME
+          value: $(params.CERT_TRACK_SECRET_NAME)
+        - name: CERT_TRACK_SECRET_KEY
+          value: $(params.CERT_TRACK_SECRET_KEY)
+        - name: RELEASE_VERSION
+          value: "$(tasks.parse-metadata.results.source-git-revision)"
+        - name: OPERATOR_NAME
+          value: "$(tasks.get-unreleased-bundle.results.packageName)"
+        - name: OCI_REF
+          value: $(params.OCI_REF)
+        - name: CREDENTIALS_SECRET_NAME
+          value: $(params.CREDENTIALS_SECRET_NAME)
+      workspaces:
+        - name: shared
+          workspace: shared
+
+  finally:
+    # ── Cleanup Operator ───────────────────────────────────────────────
+    - name: cleanup-operator
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/cleanup-operator/0.1/cleanup-operator.yaml
+      params:
+        - name: INSTALL_NAMESPACE
+          value: "$(tasks.deploy-operator.results.installNamespace)"
+        - name: CATALOGSOURCE_NAME
+          value: "$(tasks.deploy-operator.results.catalogSourceName)"
+        - name: SUBSCRIPTION_NAME
+          value: "$(tasks.deploy-operator.results.subscriptionName)"
+        - name: CSV_NAME
+          value: "$(tasks.deploy-operator.results.csvName)"
+        - name: OPERAND_NAMESPACE
+          value: "$(tasks.deploy-operands.results.operandNamespace)"
+      when:
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+
+    # ── OADP Restore (post-test cleanup) ───────────────────────────────
+    - name: oadp-restore-post
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/oadp-restore/0.1/oadp-restore.yaml
+      params:
+        - name: BACKUP_NAME
+          value: $(params.OADP_BACKUP_NAME)
+        - name: OADP_NAMESPACE
+          value: $(params.OADP_NAMESPACE)
+        - name: RESTORE_SUFFIX
+          value: "post-$(context.pipelineRun.uid)"
+      when:
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+
+    # ── Release Cluster Lock ───────────────────────────────────────────
+    - name: release-cluster-lock
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/release-cluster-lock/0.1/release-cluster-lock.yaml
+      params:
+        - name: LOCK_NAME
+          value: $(params.LOCK_NAME)
+        - name: OWNER
+          value: $(context.pipelineRun.name)

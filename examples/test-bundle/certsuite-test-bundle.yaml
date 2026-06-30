@@ -1,0 +1,34 @@
+# Certsuite Test Bundle Manifest
+#
+# This file describes how to deploy a software-only test version of an
+# operator's operands. The manifests in operands/ should deploy everything
+# needed to exercise the operator without requiring specialized hardware,
+# license keys, or external services.
+#
+# The test bundle is NOT responsible for certsuite configuration -- that
+# is handled separately via the CERTSUITE_CONFIG_SECRET pipeline parameter.
+apiVersion: certsuite.redhat.com/v1alpha1
+kind: TestBundle
+metadata:
+  name: example-operator-test-bundle
+  labels:
+    app.kubernetes.io/part-of: example-operator
+spec:
+  # Namespace where operands will be deployed.
+  # Leave empty to use the operator's install namespace.
+  namespace: ""
+
+  # Human-readable description
+  description: |
+    Deploys a minimal set of example-operator operands for certsuite
+    testing. Uses software-only configuration with no hardware or
+    license dependencies.
+
+  # Readiness checks -- the pipeline waits for these before running certsuite
+  readiness:
+    timeout: 300
+    checks:
+      - kind: Deployment
+        name: example-controller
+      - kind: Deployment
+        name: example-agent

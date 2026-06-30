@@ -1,0 +1,123 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: acquire-cluster-lock
+  labels:
+    app.kubernetes.io/part-of: konflux-certsuite
+spec:
+  description: |
+    Acquires a Kubernetes Lease-based mutex on the shared test cluster.
+    If the lock is held by another pipeline run, waits up to LOCK_TIMEOUT
+    seconds. Stale leases auto-expire based on a configurable TTL.
+  params:
+    - name: LOCK_NAME
+      type: string
+      default: "certsuite-cluster-lock"
+    - name: LOCK_NAMESPACE
+      type: string
+      default: "certsuite-locks"
+    - name: OWNER
+      type: string
+      description: Unique identifier for the lock holder (typically pipelineRun name)
+    - name: LOCK_TIMEOUT
+      type: string
+      default: "1800"
+    - name: LEASE_TTL
+      type: string
+      default: "3600"
+  volumes:
+    - name: credentials
+      emptyDir: {}
+  steps:
+    - name: get-kubeconfig
+      ref:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
+      params:
+        - name: eaasSpaceSecretRef
+          value: $(params.LOCK_NAME)
+        - name: clusterName
+          value: shared
+        - name: credentials
+          value: credentials
+    - name: acquire
+      image: quay.io/openshift/origin-cli:latest
+      env:
+        - name: LOCK_NAME
+          value: "$(params.LOCK_NAME)"
+        - name: LOCK_NAMESPACE
+          value: "$(params.LOCK_NAMESPACE)"
+        - name: OWNER
+          value: "$(params.OWNER)"
+        - name: LOCK_TIMEOUT
+          value: "$(params.LOCK_TIMEOUT)"
+        - name: LEASE_TTL
+          value: "$(params.LEASE_TTL)"
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        echo "[$(date -u +%FT%T.%3NZ)] Acquiring lock '${LOCK_NAME}' in '${LOCK_NAMESPACE}'"
+
+        oc create namespace "${LOCK_NAMESPACE}" 2>/dev/null || true
+
+        ELAPSED=0
+        POLL_INTERVAL=15
+
+        while true; do
+          if oc create -f - <<LEASE_EOF 2>/dev/null
+        apiVersion: coordination.k8s.io/v1
+        kind: Lease
+        metadata:
+          name: ${LOCK_NAME}
+          namespace: ${LOCK_NAMESPACE}
+          labels:
+            app.kubernetes.io/managed-by: konflux-certsuite
+          annotations:
+            certsuite-lock/acquired-at: "$(date -u +%FT%T.%3NZ)"
+        spec:
+          holderIdentity: "${OWNER}"
+          leaseDurationSeconds: ${LEASE_TTL}
+        LEASE_EOF
+          then
+            echo "[$(date -u +%FT%T.%3NZ)] Lock acquired"
+            exit 0
+          fi
+
+          CURRENT_HOLDER=$(oc get lease "${LOCK_NAME}" -n "${LOCK_NAMESPACE}" \
+            -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || echo "unknown")
+          LEASE_DUR=$(oc get lease "${LOCK_NAME}" -n "${LOCK_NAMESPACE}" \
+            -o jsonpath='{.spec.leaseDurationSeconds}' 2>/dev/null || echo "0")
+          RENEW=$(oc get lease "${LOCK_NAME}" -n "${LOCK_NAMESPACE}" \
+            -o jsonpath='{.spec.renewTime}' 2>/dev/null || echo "")
+          ACQUIRE_TIME=$(oc get lease "${LOCK_NAME}" -n "${LOCK_NAMESPACE}" \
+            -o jsonpath='{.metadata.annotations.certsuite-lock/acquired-at}' 2>/dev/null || echo "")
+
+          echo "[$(date -u +%FT%T.%3NZ)] Held by '${CURRENT_HOLDER}' (${ELAPSED}/${LOCK_TIMEOUT}s)"
+
+          # Expire stale leases
+          if [[ -n "${ACQUIRE_TIME}" && "${LEASE_DUR}" -gt 0 ]]; then
+            NOW_EPOCH=$(date -u +%s)
+            ACQ_EPOCH=$(date -u -d "${ACQUIRE_TIME}" +%s 2>/dev/null || date -u -j -f "%FT%T" "${ACQUIRE_TIME%%.*}" +%s 2>/dev/null || echo 0)
+            EXPIRY_EPOCH=$((ACQ_EPOCH + LEASE_DUR))
+            if [[ ${NOW_EPOCH} -gt ${EXPIRY_EPOCH} && ${ACQ_EPOCH} -gt 0 ]]; then
+              echo "[$(date -u +%FT%T.%3NZ)] Stale lease detected. Deleting."
+              oc delete lease "${LOCK_NAME}" -n "${LOCK_NAMESPACE}" --ignore-not-found
+              continue
+            fi
+          fi
+
+          if [[ ${ELAPSED} -ge ${LOCK_TIMEOUT} ]]; then
+            echo "[$(date -u +%FT%T.%3NZ)] ERROR: Timed out after ${LOCK_TIMEOUT}s"
+            exit 1
+          fi
+
+          sleep ${POLL_INTERVAL}
+          ELAPSED=$((ELAPSED + POLL_INTERVAL))
+        done

@@ -1,0 +1,50 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: release-cluster-lock
+  labels:
+    app.kubernetes.io/part-of: konflux-certsuite
+spec:
+  description: |
+    Releases the Kubernetes Lease-based mutex. Only deletes the lease
+    if the holder matches the current pipeline run (prevents trampling
+    another run's lock).
+  params:
+    - name: LOCK_NAME
+      type: string
+      default: "certsuite-cluster-lock"
+    - name: LOCK_NAMESPACE
+      type: string
+      default: "certsuite-locks"
+    - name: OWNER
+      type: string
+      description: Must match the holderIdentity set during acquire
+  steps:
+    - name: release
+      image: quay.io/openshift/origin-cli:latest
+      env:
+        - name: LOCK_NAME
+          value: "$(params.LOCK_NAME)"
+        - name: LOCK_NAMESPACE
+          value: "$(params.LOCK_NAMESPACE)"
+        - name: OWNER
+          value: "$(params.OWNER)"
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        CURRENT=$(oc get lease "${LOCK_NAME}" -n "${LOCK_NAMESPACE}" \
+          -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || echo "")
+
+        if [[ -z "${CURRENT}" ]]; then
+          echo "[$(date -u +%FT%T.%3NZ)] No lock found. Nothing to release."
+          exit 0
+        fi
+
+        if [[ "${CURRENT}" != "${OWNER}" ]]; then
+          echo "[$(date -u +%FT%T.%3NZ)] Lock held by '${CURRENT}', not '${OWNER}'. Skipping."
+          exit 0
+        fi
+
+        oc delete lease "${LOCK_NAME}" -n "${LOCK_NAMESPACE}" --ignore-not-found
+        echo "[$(date -u +%FT%T.%3NZ)] Lock released"

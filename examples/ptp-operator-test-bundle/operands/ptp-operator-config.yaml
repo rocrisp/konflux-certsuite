@@ -1,0 +1,11 @@
+# PtpOperatorConfig controls which nodes run the linuxptp-daemon.
+# The "default" PtpOperatorConfig is auto-created by the operator;
+# this manifest patches it to ensure daemons run on worker nodes.
+apiVersion: ptp.openshift.io/v1
+kind: PtpOperatorConfig
+metadata:
+  name: default
+  namespace: openshift-ptp
+spec:
+  daemonNodeSelector:
+    node-role.kubernetes.io/worker: ""

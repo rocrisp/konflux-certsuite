@@ -1,0 +1,11 @@
+# Example operand ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: example-workload-config
+  labels:
+    app: example-workload
+data:
+  config.yaml: |
+    mode: test
+    log_level: info

@@ -1,0 +1,46 @@
+# Example IntegrationTestScenario for the certsuite-operator-test pipeline.
+# Copy this file into your Konflux tenants-config repository and update
+# the values marked with <REPLACE>.
+apiVersion: appstudio.redhat.com/v1beta2
+kind: IntegrationTestScenario
+metadata:
+  labels:
+    test.appstudio.openshift.io/optional: "false"
+  name: certsuite-operator-test
+  namespace: <REPLACE:tenant-namespace>
+spec:
+  application: <REPLACE:application-name>
+  contexts:
+    - description: Certsuite testing for the FBC component
+      name: component_<REPLACE:component-name>
+  params:
+    - name: KUBECONFIG_SECRET_NAME
+      value: "shared-cluster-kubeconfig"
+    - name: TEST_BUNDLE_REF
+      value: "https://github.com/<REPLACE:org>/<REPLACE:repo>.git#certsuite-test-bundle"
+    # CERTSUITE_LABELS is optional. Omit or leave empty to run all tests.
+    # - name: CERTSUITE_LABELS
+    #   value: "networking,lifecycle"
+    - name: OADP_BACKUP_NAME
+      value: "clean-baseline-backup"
+    - name: PACKAGE_NAME
+      value: ""
+    - name: CHANNEL_NAME
+      value: ""
+    - name: CREDENTIALS_SECRET_NAME
+      value: "quay-dockerconfig"
+    - name: OCI_REF
+      value: "quay.io/<REPLACE:org>/certsuite-results:latest"
+    - name: CERT_TRACK_URL
+      value: "https://cert-track-results.example.com"
+    - name: CERT_TRACK_SECRET_NAME
+      value: "cert-track-api-token"
+  resolverRef:
+    resolver: git
+    params:
+      - name: url
+        value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+      - name: revision
+        value: main
+      - name: pathInRepo
+        value: pipelines/certsuite-operator-test/0.1/certsuite-operator-test.yaml

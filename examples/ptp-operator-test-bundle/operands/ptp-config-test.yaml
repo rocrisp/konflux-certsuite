@@ -1,0 +1,46 @@
+# PtpConfig CR for software-only testing.
+#
+# This config does NOT require PTP-capable hardware. It uses the
+# software-only ("free-running") mode where ptp4l runs against the
+# system clock without binding to a physical NIC. This is enough to
+# verify the operator reconciles PtpConfig CRs, creates the correct
+# linuxptp-daemon pods, and applies configuration.
+#
+# In a real deployment you would set a real interface name and remove
+# the software-timestamp-only options.
+apiVersion: ptp.openshift.io/v1
+kind: PtpConfig
+metadata:
+  name: test-software-only
+  namespace: openshift-ptp
+spec:
+  profile:
+    - name: software-test-profile
+      ptp4lOpts: "-2 --summary_interval -4"
+      ptp4lConf: |
+        [global]
+        #
+        # Software-only PTP configuration for testing.
+        # Uses the system clock as the time source -- no hardware
+        # timestamping required.
+        #
+        twoStepFlag              1
+        slaveOnly                1
+        priority1                128
+        priority2                128
+        domainNumber             0
+        clockClass               248
+        clockAccuracy            0xFE
+        offsetScaledLogVariance  0xFFFF
+        free_running             1
+        use_syslog               1
+        verbose                  0
+        logging_level            6
+        summary_interval         -4
+        time_stamping            software
+      phc2sysOpts: "-a -r -r -n 24 -N 8 -R 16"
+  recommend:
+    - profile: software-test-profile
+      priority: 50
+      match:
+        - nodeLabel: "node-role.kubernetes.io/worker"

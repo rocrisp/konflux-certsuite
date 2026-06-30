@@ -1,0 +1,39 @@
+# Example operand Deployment.
+# Replace with your operator's actual operand CRs and workloads.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-workload
+  labels:
+    app: example-workload
+    redhat-best-practices-for-k8s.com/generic: target
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example-workload
+  template:
+    metadata:
+      labels:
+        app: example-workload
+        redhat-best-practices-for-k8s.com/generic: target
+    spec:
+      containers:
+        - name: workload
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault

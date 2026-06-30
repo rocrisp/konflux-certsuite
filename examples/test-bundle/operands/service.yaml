@@ -1,0 +1,15 @@
+# Example operand Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: example-workload
+  labels:
+    app: example-workload
+spec:
+  selector:
+    app: example-workload
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

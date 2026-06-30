@@ -1,0 +1,93 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: cleanup-operator
+  labels:
+    app.kubernetes.io/part-of: konflux-certsuite
+spec:
+  description: |
+    Removes all resources created by the operator deployment: Subscription,
+    CSV, CatalogSource, OperatorGroup, operator-installed CRDs, and the
+    install namespace.
+  params:
+    - name: INSTALL_NAMESPACE
+      type: string
+      default: ""
+    - name: CATALOGSOURCE_NAME
+      type: string
+      default: ""
+    - name: SUBSCRIPTION_NAME
+      type: string
+      default: ""
+    - name: CSV_NAME
+      type: string
+      default: ""
+    - name: OPERAND_NAMESPACE
+      type: string
+      default: ""
+    - name: CLEANUP_TIMEOUT
+      type: string
+      default: "300"
+  steps:
+    - name: cleanup
+      image: quay.io/openshift/origin-cli:latest
+      env:
+        - name: INSTALL_NAMESPACE
+          value: "$(params.INSTALL_NAMESPACE)"
+        - name: CATSRC_NAME
+          value: "$(params.CATALOGSOURCE_NAME)"
+        - name: SUB_NAME
+          value: "$(params.SUBSCRIPTION_NAME)"
+        - name: CSV_NAME
+          value: "$(params.CSV_NAME)"
+        - name: OPERAND_NAMESPACE
+          value: "$(params.OPERAND_NAMESPACE)"
+        - name: CLEANUP_TIMEOUT
+          value: "$(params.CLEANUP_TIMEOUT)"
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        if [[ -z "${INSTALL_NAMESPACE}" ]]; then
+          echo "[$(date -u +%FT%T.%3NZ)] No namespace specified. Nothing to clean up."
+          exit 0
+        fi
+
+        echo "[$(date -u +%FT%T.%3NZ)] Cleaning up namespace: ${INSTALL_NAMESPACE}"
+
+        # Delete OLM resources (order matters)
+        for KIND_NAME in \
+          "subscription/${SUB_NAME}" \
+          "csv/${CSV_NAME}" \
+          "catalogsource/${CATSRC_NAME}"; do
+
+          KIND="${KIND_NAME%%/*}"
+          NAME="${KIND_NAME##*/}"
+          if [[ -n "${NAME}" ]]; then
+            echo "  Deleting ${KIND}/${NAME}"
+            oc delete "${KIND}" "${NAME}" -n "${INSTALL_NAMESPACE}" \
+              --ignore-not-found --timeout=60s 2>/dev/null || true
+          fi
+        done
+
+        # Delete operator-managed CRDs
+        CRDS=$(oc get crd -l "olm.managed=true" \
+          -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+        for CRD in ${CRDS}; do
+          echo "  Deleting CRD: ${CRD}"
+          oc delete crd "${CRD}" --ignore-not-found --timeout=60s 2>/dev/null || true
+        done
+
+        # Delete operand namespace if separate
+        if [[ -n "${OPERAND_NAMESPACE}" && "${OPERAND_NAMESPACE}" != "${INSTALL_NAMESPACE}" ]]; then
+          echo "[$(date -u +%FT%T.%3NZ)] Deleting operand namespace: ${OPERAND_NAMESPACE}"
+          oc delete namespace "${OPERAND_NAMESPACE}" \
+            --ignore-not-found --timeout="${CLEANUP_TIMEOUT}s" 2>/dev/null || true
+        fi
+
+        # Delete install namespace
+        echo "[$(date -u +%FT%T.%3NZ)] Deleting namespace: ${INSTALL_NAMESPACE}"
+        oc delete namespace "${INSTALL_NAMESPACE}" \
+          --ignore-not-found --timeout="${CLEANUP_TIMEOUT}s" 2>/dev/null || true
+
+        echo "[$(date -u +%FT%T.%3NZ)] Cleanup complete"

@@ -1,0 +1,89 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: oadp-restore
+  labels:
+    app.kubernetes.io/part-of: konflux-certsuite
+spec:
+  description: |
+    Creates an OADP (Velero) Restore CR from a named backup and polls
+    until the restore completes or times out.
+  params:
+    - name: BACKUP_NAME
+      type: string
+      description: Name of the OADP Backup to restore from
+    - name: OADP_NAMESPACE
+      type: string
+      default: "openshift-adp"
+    - name: RESTORE_TIMEOUT
+      type: string
+      default: "900"
+    - name: RESTORE_SUFFIX
+      type: string
+      default: ""
+      description: Optional suffix for the restore name (use 'pre' or 'post')
+  steps:
+    - name: restore
+      image: quay.io/openshift/origin-cli:latest
+      env:
+        - name: BACKUP_NAME
+          value: "$(params.BACKUP_NAME)"
+        - name: OADP_NAMESPACE
+          value: "$(params.OADP_NAMESPACE)"
+        - name: RESTORE_TIMEOUT
+          value: "$(params.RESTORE_TIMEOUT)"
+        - name: RESTORE_SUFFIX
+          value: "$(params.RESTORE_SUFFIX)"
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        SUFFIX="${RESTORE_SUFFIX:-$(date +%s)}"
+        RESTORE_NAME="${BACKUP_NAME}-${SUFFIX}"
+
+        echo "[$(date -u +%FT%T.%3NZ)] Creating Restore '${RESTORE_NAME}' from backup '${BACKUP_NAME}'"
+
+        oc apply -f - <<EOF
+        apiVersion: velero.io/v1
+        kind: Restore
+        metadata:
+          name: ${RESTORE_NAME}
+          namespace: ${OADP_NAMESPACE}
+        spec:
+          backupName: ${BACKUP_NAME}
+          existingResourcePolicy: update
+          includedResources:
+            - '*'
+          restorePVs: true
+        EOF
+
+        ELAPSED=0
+        POLL=10
+
+        while true; do
+          PHASE=$(oc get restore "${RESTORE_NAME}" -n "${OADP_NAMESPACE}" \
+            -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+
+          case "${PHASE}" in
+            Completed)
+              echo "[$(date -u +%FT%T.%3NZ)] Restore completed"
+              exit 0 ;;
+            PartiallyFailed)
+              echo "[$(date -u +%FT%T.%3NZ)] WARNING: Restore partially failed"
+              exit 0 ;;
+            Failed|FailedValidation)
+              echo "[$(date -u +%FT%T.%3NZ)] ERROR: Restore failed (${PHASE})"
+              oc get restore "${RESTORE_NAME}" -n "${OADP_NAMESPACE}" -o yaml
+              exit 1 ;;
+            *)
+              echo "[$(date -u +%FT%T.%3NZ)] Phase: ${PHASE} (${ELAPSED}/${RESTORE_TIMEOUT}s)" ;;
+          esac
+
+          if [[ ${ELAPSED} -ge ${RESTORE_TIMEOUT} ]]; then
+            echo "[$(date -u +%FT%T.%3NZ)] ERROR: Timed out"
+            exit 1
+          fi
+
+          sleep ${POLL}
+          ELAPSED=$((ELAPSED + POLL))
+        done
