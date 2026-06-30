@@ -226,8 +226,37 @@ that you can customize.
 
 ## Step 6: Onboard to Konflux
 
-1. **Push the test bundle** to a directory in your operator's git
-   repository (e.g. `certsuite-test-bundle/`).
+### Option A: EaaS (Recommended)
+
+No Secrets or infrastructure to manage. Each run gets a fresh cluster.
+
+1. **Push the test bundle** to your operator's git repository.
+
+2. **Create an IntegrationTestScenario** using the EaaS pipeline.
+   See [examples/integration-test-scenario-eaas.yaml](../examples/integration-test-scenario-eaas.yaml).
+
+   The only required parameter is `TEST_BUNDLE_REF`:
+   ```yaml
+   params:
+     - name: TEST_BUNDLE_REF
+       value: "https://github.com/org/repo.git#certsuite-test-bundle"
+   resolverRef:
+     resolver: git
+     params:
+       - name: url
+         value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+       - name: pathInRepo
+         value: pipelines/certsuite-operator-test/0.1/certsuite-operator-test-eaas.yaml
+   ```
+
+3. **Merge a change** to your FBC component. The pipeline triggers
+   automatically on push events.
+
+### Option B: Shared Cluster
+
+Use when you need a persistent cluster (e.g. hardware tests).
+
+1. **Push the test bundle** to your operator's git repository.
 
 2. **Create Secrets** in your Konflux tenant namespace:
 
@@ -236,40 +265,20 @@ that you can customize.
    oc create secret generic shared-cluster-kubeconfig \
      --from-file=kubeconfig=/path/to/kubeconfig \
      -n <tenant-namespace>
-
-   # Certsuite configuration
-   oc create secret generic certsuite-config \
-     --from-file=certsuite_config.yml=/path/to/certsuite_config.yml \
-     -n <tenant-namespace>
-
-   # cert-track-results API token
-   oc create secret generic cert-track-api-token \
-     --from-literal=api-token=<your-token> \
-     -n <tenant-namespace>
-
-   # OCI registry credentials
-   oc create secret docker-registry quay-dockerconfig \
-     --docker-server=quay.io \
-     --docker-username=<user> \
-     --docker-password=<token> \
-     -n <tenant-namespace>
    ```
 
-3. **Create an IntegrationTestScenario** in your tenants-config
-   repository. See
-   [examples/integration-test-scenario.yaml](../examples/integration-test-scenario.yaml)
-   for a template.
+3. **Create an IntegrationTestScenario** using the shared-cluster pipeline.
+   See [examples/integration-test-scenario.yaml](../examples/integration-test-scenario.yaml).
 
-   Key parameters to set:
-   - `TEST_BUNDLE_REF`: Git URL to your test bundle, e.g.
-     `https://github.com/org/repo.git#certsuite-test-bundle`
-   - `CERTSUITE_CONFIG_SECRET`: Name of the secret containing your
-     certsuite_config.yml
-   - `CERTSUITE_LABELS`: (Optional) Comma-separated test labels.
-     Leave empty to run all tests.
+   ```yaml
+   resolverRef:
+     resolver: git
+     params:
+       - name: pathInRepo
+         value: pipelines/certsuite-operator-test/0.1/certsuite-operator-test.yaml
+   ```
 
-4. **Merge a change** to your FBC component. The pipeline triggers
-   automatically on push events.
+4. **Merge a change** to your FBC component.
 
 ## Example: ptp-operator
 
@@ -290,8 +299,9 @@ demonstrates a real-world bundle:
 |-------|-------|-----|
 | "certsuite-test-bundle.yaml not found" | Wrong `TEST_BUNDLE_REF` path | Check the `#path` fragment in the ref |
 | Operands never become Ready | Missing dependencies or bad config | Test locally first (Step 4) |
-| Lock timeout | Another pipeline is running | Increase `LOCK_TIMEOUT` or wait |
-| OADP restore fails | Backup expired or missing | Recreate the baseline backup |
+| EaaS cluster provision timeout | MCE/Hypershift issue | Check Konflux status; retry |
+| Lock timeout (shared cluster only) | Another pipeline is running | Increase `LOCK_TIMEOUT` or wait |
+| OADP restore fails (shared cluster only) | Backup expired or missing | Recreate the baseline backup |
 
 ## Reference
 

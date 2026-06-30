@@ -1,49 +1,48 @@
 # Architecture Guide
 
-This document describes the end-to-end workflow of the Konflux Certsuite
-shared test pipeline, how concurrency is managed, how cluster state is
-restored, and how results flow to the cert-track-results web application.
+This document describes the Konflux Certsuite test pipelines, how
+clusters are provisioned or managed, and how results flow to storage.
 
-## System Overview
+There are two pipeline variants:
+- **EaaS** (recommended) -- ephemeral cluster per run, no infrastructure to manage
+- **Shared Cluster** -- persistent cluster with locking and OADP cleanup
+
+## EaaS Pipeline (Recommended)
+
+Each run provisions a fresh Hypershift cluster via Konflux EaaS. No
+kubeconfig secrets, no locks, no cleanup -- the cluster is destroyed
+automatically when the PipelineRun completes.
 
 ```mermaid
-flowchart LR
-    subgraph konflux [Konflux Platform]
-        ITS[IntegrationTestScenario]
-        PR[PipelineRun]
-        ITS -->|triggers| PR
-    end
-
-    subgraph shared [Shared OpenShift Cluster]
-        Lock[Lease Mutex]
-        OADP[OADP Operator]
-        OLM[OLM / CatalogSource]
-        Operands[Operand Workloads]
-        Certsuite[Certsuite Runner]
-    end
-
-    subgraph results [Results Storage]
-        CertTrack[cert-track-results]
-        OCI[OCI Registry]
-    end
-
-    PR -->|kubeconfig| shared
-    PR -->|claim.json| CertTrack
-    PR -->|tarball| OCI
+flowchart TD
+    A[parse-metadata] --> B[provision-eaas-space]
+    B --> C[get-unreleased-bundle]
+    C --> D[pick-cluster-params]
+    D --> E[provision-cluster]
+    E --> F["deploy-and-test\n(deploy operator + operands + run certsuite)"]
+    F --> G[collect-results]
 ```
 
-## Pipeline Flow
+| Stage | What it does |
+|-------|-------------|
+| `provision-eaas-space` | Allocates an EaaS space for cluster provisioning |
+| `get-unreleased-bundle` | Extracts the operator bundle from the FBC fragment |
+| `pick-cluster-params` | Selects OCP version and architecture from supported list |
+| `provision-cluster` | Creates an ephemeral Hypershift AWS cluster |
+| `deploy-and-test` | Gets kubeconfig, deploys operator via OLM, deploys operands from test bundle, runs certsuite |
+| `collect-results` | Optionally pushes claim.json to cert-track-results and/or OCI |
 
-The pipeline executes the following stages in order. If any stage fails,
-the `finally` block ensures the cluster is cleaned up and the lock is
-released.
+## Shared Cluster Pipeline
+
+Uses a pre-existing cluster accessed via kubeconfig Secret. Includes
+Lease-based queueing and OADP backup/restore for multi-tenant safety.
 
 ```mermaid
 flowchart TD
     A[parse-metadata] --> B[get-unreleased-bundle]
     B --> C[acquire-cluster-lock]
     C --> D[oadp-restore-pre]
-    D --> E[deploy-operator]
+    C --> E[deploy-operator]
     E --> F[deploy-operands]
     F --> G[run-certsuite]
     G --> H[collect-results]

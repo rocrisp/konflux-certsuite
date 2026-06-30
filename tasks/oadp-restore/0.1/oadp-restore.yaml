@@ -6,8 +6,9 @@ metadata:
     app.kubernetes.io/part-of: konflux-certsuite
 spec:
   description: |
-    Creates an OADP (Velero) Restore CR from a named backup and polls
-    until the restore completes or times out.
+    Manages OADP cluster state. On the first run (no existing backup),
+    creates a baseline Backup of the clean cluster. On subsequent runs,
+    restores from that backup to reset the cluster to a known state.
   params:
     - name: KUBECONFIG_SECRET_NAME
       type: string
@@ -17,13 +18,16 @@ spec:
       default: "kubeconfig"
     - name: BACKUP_NAME
       type: string
-      description: Name of the OADP Backup to restore from
+      description: Name of the OADP Backup (created if missing, restored if exists)
     - name: OADP_NAMESPACE
       type: string
       default: "openshift-adp"
     - name: RESTORE_TIMEOUT
       type: string
       default: "900"
+    - name: BACKUP_TIMEOUT
+      type: string
+      default: "600"
     - name: RESTORE_SUFFIX
       type: string
       default: ""
@@ -33,7 +37,7 @@ spec:
       secret:
         secretName: $(params.KUBECONFIG_SECRET_NAME)
   steps:
-    - name: restore
+    - name: backup-or-restore
       image: quay.io/openshift/origin-cli:latest
       volumeMounts:
         - name: kubeconfig
@@ -48,18 +52,59 @@ spec:
           value: "$(params.OADP_NAMESPACE)"
         - name: RESTORE_TIMEOUT
           value: "$(params.RESTORE_TIMEOUT)"
+        - name: BACKUP_TIMEOUT
+          value: "$(params.BACKUP_TIMEOUT)"
         - name: RESTORE_SUFFIX
           value: "$(params.RESTORE_SUFFIX)"
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
 
-        SUFFIX="${RESTORE_SUFFIX:-$(date +%s)}"
-        RESTORE_NAME="${BACKUP_NAME}-${SUFFIX}"
+        wait_for_phase() {
+          local kind="$1" name="$2" timeout="$3"
+          local elapsed=0 poll=10
 
-        echo "[$(date -u +%FT%T.%3NZ)] Creating Restore '${RESTORE_NAME}' from backup '${BACKUP_NAME}'"
+          while true; do
+            PHASE=$(oc get "${kind}" "${name}" -n "${OADP_NAMESPACE}" \
+              -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
 
-        oc apply -f - <<EOF
+            case "${PHASE}" in
+              Completed)
+                echo "[$(date -u +%FT%T.%3NZ)] ${kind} '${name}' completed"
+                return 0 ;;
+              PartiallyFailed)
+                echo "[$(date -u +%FT%T.%3NZ)] WARNING: ${kind} '${name}' partially failed"
+                return 0 ;;
+              Failed|FailedValidation)
+                echo "[$(date -u +%FT%T.%3NZ)] ERROR: ${kind} '${name}' failed (${PHASE})"
+                oc get "${kind}" "${name}" -n "${OADP_NAMESPACE}" -o yaml
+                return 1 ;;
+              *)
+                echo "[$(date -u +%FT%T.%3NZ)] ${kind} phase: ${PHASE} (${elapsed}/${timeout}s)" ;;
+            esac
+
+            if [[ ${elapsed} -ge ${timeout} ]]; then
+              echo "[$(date -u +%FT%T.%3NZ)] ERROR: Timed out waiting for ${kind}"
+              return 1
+            fi
+
+            sleep ${poll}
+            elapsed=$((elapsed + poll))
+          done
+        }
+
+        # Check if the backup already exists
+        if oc get backup "${BACKUP_NAME}" -n "${OADP_NAMESPACE}" &>/dev/null; then
+          BACKUP_PHASE=$(oc get backup "${BACKUP_NAME}" -n "${OADP_NAMESPACE}" \
+            -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+
+          if [[ "${BACKUP_PHASE}" == "Completed" ]]; then
+            echo "[$(date -u +%FT%T.%3NZ)] Backup '${BACKUP_NAME}' exists (phase: Completed). Restoring..."
+
+            SUFFIX="${RESTORE_SUFFIX:-$(date +%s)}"
+            RESTORE_NAME="${BACKUP_NAME}-${SUFFIX}"
+
+            oc apply -f - <<RESTORE_EOF
         apiVersion: velero.io/v1
         kind: Restore
         metadata:
@@ -71,35 +116,94 @@ spec:
           includedResources:
             - '*'
           restorePVs: true
-        EOF
+        RESTORE_EOF
 
-        ELAPSED=0
-        POLL=10
-
-        while true; do
-          PHASE=$(oc get restore "${RESTORE_NAME}" -n "${OADP_NAMESPACE}" \
-            -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
-
-          case "${PHASE}" in
-            Completed)
-              echo "[$(date -u +%FT%T.%3NZ)] Restore completed"
-              exit 0 ;;
-            PartiallyFailed)
-              echo "[$(date -u +%FT%T.%3NZ)] WARNING: Restore partially failed"
-              exit 0 ;;
-            Failed|FailedValidation)
-              echo "[$(date -u +%FT%T.%3NZ)] ERROR: Restore failed (${PHASE})"
-              oc get restore "${RESTORE_NAME}" -n "${OADP_NAMESPACE}" -o yaml
-              exit 1 ;;
-            *)
-              echo "[$(date -u +%FT%T.%3NZ)] Phase: ${PHASE} (${ELAPSED}/${RESTORE_TIMEOUT}s)" ;;
-          esac
-
-          if [[ ${ELAPSED} -ge ${RESTORE_TIMEOUT} ]]; then
-            echo "[$(date -u +%FT%T.%3NZ)] ERROR: Timed out"
-            exit 1
+            wait_for_phase "restore" "${RESTORE_NAME}" "${RESTORE_TIMEOUT}"
+            exit $?
+          else
+            echo "[$(date -u +%FT%T.%3NZ)] Backup '${BACKUP_NAME}' exists but phase is '${BACKUP_PHASE}'. Skipping restore."
+            exit 0
           fi
+        fi
 
-          sleep ${POLL}
-          ELAPSED=$((ELAPSED + POLL))
-        done
+        # No backup exists -- this is the first run. Create a baseline backup.
+        echo "[$(date -u +%FT%T.%3NZ)] No backup '${BACKUP_NAME}' found. Creating baseline backup of current cluster state..."
+
+        oc apply -f - <<BACKUP_EOF
+        apiVersion: velero.io/v1
+        kind: Backup
+        metadata:
+          name: ${BACKUP_NAME}
+          namespace: ${OADP_NAMESPACE}
+          labels:
+            app.kubernetes.io/managed-by: konflux-certsuite
+        spec:
+          excludedNamespaces:
+            - ${OADP_NAMESPACE}
+            - openshift-apiserver
+            - openshift-apiserver-operator
+            - openshift-authentication
+            - openshift-authentication-operator
+            - openshift-cloud-controller-manager
+            - openshift-cloud-controller-manager-operator
+            - openshift-cloud-credential-operator
+            - openshift-cluster-csi-drivers
+            - openshift-cluster-machine-approver
+            - openshift-cluster-node-tuning-operator
+            - openshift-cluster-samples-operator
+            - openshift-cluster-storage-operator
+            - openshift-cluster-version
+            - openshift-config
+            - openshift-config-managed
+            - openshift-config-operator
+            - openshift-console
+            - openshift-console-operator
+            - openshift-controller-manager
+            - openshift-controller-manager-operator
+            - openshift-dns
+            - openshift-dns-operator
+            - openshift-etcd
+            - openshift-etcd-operator
+            - openshift-host-network
+            - openshift-image-registry
+            - openshift-infra
+            - openshift-ingress
+            - openshift-ingress-canary
+            - openshift-ingress-operator
+            - openshift-insights
+            - openshift-kni-infra
+            - openshift-kube-apiserver
+            - openshift-kube-apiserver-operator
+            - openshift-kube-controller-manager
+            - openshift-kube-controller-manager-operator
+            - openshift-kube-scheduler
+            - openshift-kube-scheduler-operator
+            - openshift-kube-storage-version-migrator
+            - openshift-kube-storage-version-migrator-operator
+            - openshift-machine-api
+            - openshift-machine-config-operator
+            - openshift-marketplace
+            - openshift-monitoring
+            - openshift-multus
+            - openshift-network-diagnostics
+            - openshift-network-operator
+            - openshift-node
+            - openshift-oauth-apiserver
+            - openshift-operator-lifecycle-manager
+            - openshift-operators
+            - openshift-sdn
+            - openshift-service-ca
+            - openshift-service-ca-operator
+            - openshift-user-workload-monitoring
+            - kube-node-lease
+            - kube-public
+            - kube-system
+          includedResources:
+            - '*'
+          storageLocation: default
+          ttl: 720h0m0s
+        BACKUP_EOF
+
+        echo "[$(date -u +%FT%T.%3NZ)] Waiting for backup to complete..."
+        wait_for_phase "backup" "${BACKUP_NAME}" "${BACKUP_TIMEOUT}"
+        exit $?

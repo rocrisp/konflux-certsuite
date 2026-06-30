@@ -48,7 +48,12 @@ spec:
         When empty, all certsuite tests are run.
     - name: OADP_BACKUP_NAME
       type: string
-      description: OADP Backup name to restore from
+      default: "certsuite-clean-baseline"
+      description: |
+        OADP Backup name. On the first run, if no backup with this name
+        exists, the pipeline creates one from the current cluster state.
+        On subsequent runs, the pipeline restores from it. Set to empty
+        to skip OADP entirely (cleanup task still removes operator resources).
     - name: OADP_NAMESPACE
       type: string
       default: "openshift-adp"
@@ -66,15 +71,23 @@ spec:
       default: "certsuite-cluster-lock"
     - name: CREDENTIALS_SECRET_NAME
       type: string
-      description: Secret for OCI registry credentials
+      default: ""
+      description: |
+        Secret for OCI registry credentials. When empty, OCI push is skipped.
     - name: OCI_REF
       type: string
-      description: OCI artifact reference for results
+      default: ""
+      description: |
+        OCI artifact reference for results. When empty, OCI push is skipped.
     - name: CERT_TRACK_URL
       type: string
-      description: Base URL of the cert-track-results instance
+      default: ""
+      description: |
+        Base URL of the cert-track-results instance. When empty, cert-track
+        upload is skipped.
     - name: CERT_TRACK_SECRET_NAME
       type: string
+      default: ""
       description: Secret containing the cert-track API token
     - name: CERT_TRACK_SECRET_KEY
       type: string
@@ -231,6 +244,9 @@ spec:
         - input: $(tasks.parse-metadata.results.test-event-type)
           operator: in
           values: ["push", "Push"]
+        - input: "$(params.OADP_BACKUP_NAME)"
+          operator: notin
+          values: [""]
       taskRef:
         resolver: git
         params:
@@ -253,9 +269,13 @@ spec:
           value: "pre-$(context.pipelineRun.uid)"
 
     # ── 5. Deploy Operator via OLM ─────────────────────────────────────
+    #       Runs after acquire-cluster-lock. When OADP is enabled,
+    #       oadp-restore-pre also runs after acquire-cluster-lock but
+    #       deploy-operator does not depend on it to avoid being skipped
+    #       when OADP is disabled.
     - name: deploy-operator
       runAfter:
-        - oadp-restore-pre
+        - acquire-cluster-lock
       when:
         - input: $(tasks.parse-metadata.results.test-event-type)
           operator: in
@@ -438,6 +458,9 @@ spec:
         - input: $(tasks.parse-metadata.results.test-event-type)
           operator: in
           values: ["push", "Push"]
+        - input: "$(params.OADP_BACKUP_NAME)"
+          operator: notin
+          values: [""]
 
     # ── Release Cluster Lock ───────────────────────────────────────────
     - name: release-cluster-lock
