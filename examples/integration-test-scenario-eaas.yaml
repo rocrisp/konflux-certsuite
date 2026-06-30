@@ -1,0 +1,34 @@
+# Example IntegrationTestScenario using the EaaS (ephemeral cluster) variant.
+# This is the recommended approach -- no kubeconfig secrets, OADP, or
+# cluster locks needed. Each run provisions a fresh Hypershift cluster.
+#
+# Copy this file into your Konflux tenants-config repository and update
+# the values marked with <REPLACE>.
+apiVersion: appstudio.redhat.com/v1beta2
+kind: IntegrationTestScenario
+metadata:
+  labels:
+    test.appstudio.openshift.io/optional: "false"
+  name: certsuite-operator-test
+  namespace: <REPLACE:tenant-namespace>
+spec:
+  application: <REPLACE:application-name>
+  contexts:
+    - description: Certsuite testing for the FBC component
+      name: component_<REPLACE:component-name>
+  params:
+    - name: TEST_BUNDLE_REF
+      value: "https://github.com/<REPLACE:org>/<REPLACE:repo>.git#certsuite-test-bundle"
+    # All other params are optional with sensible defaults:
+    # - CERTSUITE_LABELS: empty = run all tests
+    # - CERT_TRACK_URL: empty = skip cert-track upload
+    # - OCI_REF: empty = skip OCI push
+  resolverRef:
+    resolver: git
+    params:
+      - name: url
+        value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+      - name: revision
+        value: main
+      - name: pathInRepo
+        value: pipelines/certsuite-operator-test/0.1/certsuite-operator-test-eaas.yaml

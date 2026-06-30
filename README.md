@@ -1,27 +1,35 @@
-# Konflux Certsuite Shared Test
+# Konflux Certsuite Test
 
 A [Konflux](https://konflux-ci.dev/) integration test pipeline that deploys an
-operator from an FBC (File-Based Catalog) fragment onto a **shared, long-lived
-OpenShift cluster** and runs the
+operator from an FBC (File-Based Catalog) fragment, runs the
 [Red Hat Best Practices Test Suite for Kubernetes](https://github.com/redhat-best-practices-for-k8s/certsuite)
-(certsuite) against it.
+(certsuite) against it, and collects results.
+
+## Two Pipeline Variants
+
+### EaaS (Recommended)
+
+`certsuite-operator-test-eaas.yaml` -- provisions a fresh ephemeral
+Hypershift cluster per run via Konflux EaaS. No kubeconfig secrets, no
+cluster locks, no OADP. The cluster is automatically destroyed when the
+run completes.
+
+### Shared Cluster
+
+`certsuite-operator-test.yaml` -- uses a pre-existing cluster via a
+kubeconfig Secret. Includes Lease-based queueing and OADP
+backup/restore. Use this only when your tests require persistent
+infrastructure (e.g. hardware-dependent tests).
 
 ## Key Features
 
-- **Shared cluster model** -- uses an existing OpenShift cluster via kubeconfig
-  instead of provisioning an ephemeral one, reducing cost and spin-up time.
-- **Concurrency queue** -- Kubernetes Lease-based mutex ensures only one
-  pipeline run uses the cluster at a time; others wait in line.
-- **OADP cleanup** -- cluster state is restored to a known baseline before and
-  after every run via OpenShift API for Data Protection (OADP / Velero).
 - **Operator test bundle** -- operator owners provide a portable bundle of
   software-only operand manifests so the full operator scope is exercised
   without hardware or license dependencies.
-- **Parameterized suites** -- certsuite test labels are a pipeline parameter,
-  so each project can choose which suites to run.
-- **Results to cert-track-results** -- claim.json is automatically pushed to
-  the cert-track-results web app with retention policies (last 3 full results
-  per operator/release; older runs are stripped of debug data).
+- **All tests by default** -- runs the full certsuite suite unless
+  `CERTSUITE_LABELS` specifies a subset.
+- **Results to cert-track-results** -- claim.json is optionally pushed to
+  the cert-track-results web app with retention policies.
 
 ## Quick Start
 
@@ -41,67 +49,31 @@ docs/               Architecture and onboarding documentation
 examples/           Example IntegrationTestScenario, OADP backup, test bundle
 ```
 
-## Shared Cluster Prerequisites
-
-Before any pipeline run the shared cluster must have:
-
-1. **OADP operator** installed with a `DataProtectionApplication` CR configured
-   against an S3-compatible backend (e.g. AWS S3, MinIO, ODF).
-2. **Baseline OADP Backup** created from the clean cluster state. See
-   [examples/oadp-baseline-backup.yaml](examples/oadp-baseline-backup.yaml).
-3. **Kubeconfig Secret** in every Konflux tenant namespace that will use this
-   pipeline:
-
-   ```yaml
-   apiVersion: v1
-   kind: Secret
-   metadata:
-     name: shared-cluster-kubeconfig
-     namespace: <tenant-namespace>
-   type: Opaque
-   data:
-     kubeconfig: <base64-encoded-kubeconfig>
-   ```
-
-4. **RBAC** -- the kubeconfig identity needs permissions to:
-   - Create/delete Leases in the `certsuite-locks` namespace
-   - Create OADP Restore CRs in the OADP namespace
-   - Manage OLM resources (CatalogSource, Subscription, OperatorGroup, CSV)
-   - Create/delete namespaces and CRDs
-5. **cert-track-results API token** stored as a Secret:
-
-   ```yaml
-   apiVersion: v1
-   kind: Secret
-   metadata:
-     name: cert-track-api-token
-     namespace: <tenant-namespace>
-   type: Opaque
-   data:
-     api-token: <base64-encoded-token>
-   ```
-
-## Pipeline Parameters
+## EaaS Pipeline Parameters
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `SNAPSHOT` | yes | -- | Konflux ApplicationSnapshot JSON |
-| `KUBECONFIG_SECRET_NAME` | no | `shared-cluster-kubeconfig` | Secret holding the shared cluster kubeconfig |
-| `KUBECONFIG_SECRET_KEY` | no | `kubeconfig` | Key inside the secret |
-| `KUBECONFIG_VALUE` | no | `""` | Base64-encoded kubeconfig (testing only; auto-creates a temporary Secret) |
-| `TEST_BUNDLE_REF` | yes | -- | Git URL or OCI ref to the operator test bundle |
+| `SNAPSHOT` | auto | -- | Provided by Konflux |
+| `TEST_BUNDLE_REF` | yes | -- | Git URL to the operator test bundle |
 | `CERTSUITE_LABELS` | no | `""` (all) | Comma-separated certsuite labels; empty runs all tests |
-| `OADP_BACKUP_NAME` | yes | -- | OADP Backup name to restore from |
-| `OADP_NAMESPACE` | no | `openshift-adp` | Namespace of the OADP operator |
 | `PACKAGE_NAME` | no | auto-detect | OLM package name |
 | `CHANNEL_NAME` | no | auto-detect | OLM channel name |
+| `CREDENTIALS_SECRET_NAME` | no | `""` | Secret for OCI push; empty skips |
+| `OCI_REF` | no | `""` | OCI artifact ref; empty skips |
+| `CERT_TRACK_URL` | no | `""` | cert-track-results URL; empty skips |
+| `CERT_TRACK_SECRET_NAME` | no | `""` | cert-track API token secret |
+
+## Shared Cluster Pipeline Parameters
+
+Additional parameters (on top of the EaaS ones):
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `KUBECONFIG_SECRET_NAME` | no | `shared-cluster-kubeconfig` | Secret holding the kubeconfig |
+| `KUBECONFIG_VALUE` | no | `""` | Base64 kubeconfig for testing; auto-creates a temporary Secret |
+| `OADP_BACKUP_NAME` | no | `certsuite-clean-baseline` | OADP Backup name; first run creates it; empty skips OADP |
 | `LOCK_TIMEOUT` | no | `1800` | Seconds to wait for cluster lock |
 | `LOCK_NAME` | no | `certsuite-cluster-lock` | Lease name for the mutex |
-| `CREDENTIALS_SECRET_NAME` | yes | -- | Secret for OCI registry credentials |
-| `OCI_REF` | yes | -- | OCI artifact reference for results |
-| `CERT_TRACK_URL` | yes | -- | Base URL of cert-track-results |
-| `CERT_TRACK_SECRET_NAME` | yes | -- | Secret with cert-track API token |
-| `CERT_TRACK_SECRET_KEY` | no | `api-token` | Key inside the token secret |
 
 ## License
 

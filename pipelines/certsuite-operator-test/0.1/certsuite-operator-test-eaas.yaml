@@ -1,0 +1,632 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: certsuite-operator-test-eaas
+  labels:
+    app.kubernetes.io/part-of: konflux-certsuite
+    upstream-usable: "true"
+spec:
+  description: |
+    Provisions an ephemeral EaaS Hypershift cluster, deploys an operator from
+    an FBC fragment, deploys operands from a test bundle, and runs certsuite.
+    The cluster is automatically destroyed when the PipelineRun completes.
+
+    This is the recommended variant for most operators. Use the shared-cluster
+    variant (certsuite-operator-test.yaml) only when you need a persistent
+    cluster with specific hardware or configuration.
+  params:
+    - name: SNAPSHOT
+      type: string
+      description: Konflux ApplicationSnapshot JSON
+    - name: TEST_BUNDLE_REF
+      type: string
+      description: |
+        Git URL (with optional #path fragment) pointing to the operator's
+        certsuite test bundle.
+    - name: CERTSUITE_LABELS
+      type: string
+      default: ""
+      description: |
+        Comma-separated certsuite test labels (e.g. "networking,lifecycle").
+        When empty, all certsuite tests are run.
+    - name: PACKAGE_NAME
+      type: string
+      default: ""
+    - name: CHANNEL_NAME
+      type: string
+      default: ""
+    - name: CREDENTIALS_SECRET_NAME
+      type: string
+      default: ""
+      description: Secret for OCI registry credentials. Empty skips OCI push.
+    - name: OCI_REF
+      type: string
+      default: ""
+      description: OCI artifact reference for results. Empty skips OCI push.
+    - name: CERT_TRACK_URL
+      type: string
+      default: ""
+      description: Base URL of cert-track-results. Empty skips upload.
+    - name: CERT_TRACK_SECRET_NAME
+      type: string
+      default: ""
+    - name: CERT_TRACK_SECRET_KEY
+      type: string
+      default: "api-token"
+
+  tasks:
+    # ── 1. Parse Snapshot Metadata ──────────────────────────────────────
+    - name: parse-metadata
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/konflux-ci/integration-examples
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/test_metadata.yaml
+      params:
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+
+    # ── 2. Provision EaaS Space ────────────────────────────────────────
+    - name: provision-eaas-space
+      runAfter:
+        - parse-metadata
+      when:
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: task/eaas-provision-space/0.1/eaas-provision-space.yaml
+      params:
+        - name: ownerName
+          value: $(context.pipelineRun.name)
+        - name: ownerUid
+          value: $(context.pipelineRun.uid)
+
+    # ── 3. Get Unreleased Bundle from FBC ──────────────────────────────
+    - name: get-unreleased-bundle
+      runAfter:
+        - provision-eaas-space
+      when:
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskSpec:
+        results:
+          - name: unreleasedBundle
+          - name: packageName
+            value: "$(steps.get-bundle.results.packageName)"
+          - name: channelName
+            value: "$(steps.get-bundle.results.channelName)"
+        steps:
+          - name: get-bundle
+            computeResources:
+              limits:
+                memory: 8Gi
+              requests:
+                memory: 8Gi
+                cpu: "1"
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/tekton-integration-catalog.git
+                - name: revision
+                  value: main
+                - name: pathInRepo
+                  value: stepactions/bundles/get-unreleased-bundle/0.1/get-unreleased-bundle.yaml
+            params:
+              - name: fbcFragment
+                value: "$(tasks.parse-metadata.results.component-container-image)"
+              - name: packageName
+                value: $(params.PACKAGE_NAME)
+              - name: channelName
+                value: $(params.CHANNEL_NAME)
+
+    # ── 4. Pick Cluster Params ─────────────────────────────────────────
+    - name: pick-cluster-params
+      runAfter:
+        - get-unreleased-bundle
+      when:
+        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+          operator: notin
+          values: [""]
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskSpec:
+        results:
+          - name: ocpVersion
+            value: "$(steps.pick-cluster-version.results.ocpVersion)"
+          - name: bundleArch
+            value: "$(steps.pick-cluster-arch.results.bundleArch)"
+        steps:
+          - name: get-supported-versions
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/build-definitions.git
+                - name: revision
+                  value: main
+                - name: pathInRepo
+                  value: stepactions/eaas-get-supported-ephemeral-cluster-versions/0.1/eaas-get-supported-ephemeral-cluster-versions.yaml
+            params:
+              - name: eaasSpaceSecretRef
+                value: "$(tasks.provision-eaas-space.results.secretRef)"
+          - name: pick-cluster-version
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/tekton-integration-catalog.git
+                - name: revision
+                  value: main
+                - name: pathInRepo
+                  value: stepactions/bundles/pick-cluster-version/0.1/pick-cluster-version.yaml
+            params:
+              - name: fbcFragment
+                value: "$(tasks.parse-metadata.results.component-container-image)"
+              - name: clusterVersions
+                value: ["$(steps.get-supported-versions.results.versions[*])"]
+          - name: pick-cluster-arch
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/tekton-integration-catalog.git
+                - name: revision
+                  value: main
+                - name: pathInRepo
+                  value: stepactions/bundles/pick-cluster-arch/0.1/pick-cluster-arch.yaml
+            params:
+              - name: bundleImage
+                value: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+
+    # ── 5. Provision Ephemeral Cluster ─────────────────────────────────
+    - name: provision-cluster
+      runAfter:
+        - pick-cluster-params
+      when:
+        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+          operator: notin
+          values: [""]
+        - input: "$(tasks.pick-cluster-params.results.ocpVersion)"
+          operator: notin
+          values: [""]
+        - input: "$(tasks.pick-cluster-params.results.bundleArch)"
+          operator: notin
+          values: [""]
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskSpec:
+        results:
+          - name: clusterName
+            value: "$(steps.create-cluster.results.clusterName)"
+        steps:
+          - name: get-latest-version-tag
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/build-definitions.git
+                - name: revision
+                  value: main
+                - name: pathInRepo
+                  value: stepactions/eaas-get-latest-openshift-version-by-prefix/0.1/eaas-get-latest-openshift-version-by-prefix.yaml
+            params:
+              - name: prefix
+                value: "$(tasks.pick-cluster-params.results.ocpVersion)"
+          - name: create-cluster
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/build-definitions.git
+                - name: revision
+                  value: main
+                - name: pathInRepo
+                  value: stepactions/eaas-create-ephemeral-cluster-hypershift-aws/0.1/eaas-create-ephemeral-cluster-hypershift-aws.yaml
+            params:
+              - name: eaasSpaceSecretRef
+                value: $(tasks.provision-eaas-space.results.secretRef)
+              - name: version
+                value: "$(steps.get-latest-version-tag.results.version)"
+              - name: instanceType
+                value: "$(tasks.pick-cluster-params.results.bundleArch)"
+
+    # ── 6. Deploy Operator + Operands + Run Certsuite ──────────────────
+    - name: deploy-and-test
+      runAfter:
+        - provision-cluster
+      when:
+        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+          operator: notin
+          values: [""]
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      params:
+        - name: eaasSpaceSecretRef
+          value: $(tasks.provision-eaas-space.results.secretRef)
+        - name: clusterName
+          value: "$(tasks.provision-cluster.results.clusterName)"
+        - name: fbcFragment
+          value: "$(tasks.parse-metadata.results.component-container-image)"
+        - name: bundleImage
+          value: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+        - name: packageName
+          value: "$(tasks.get-unreleased-bundle.results.packageName)"
+        - name: channelName
+          value: "$(tasks.get-unreleased-bundle.results.channelName)"
+        - name: testBundleRef
+          value: $(params.TEST_BUNDLE_REF)
+        - name: certsuiteLabels
+          value: $(params.CERTSUITE_LABELS)
+      taskSpec:
+        params:
+          - name: eaasSpaceSecretRef
+            type: string
+          - name: clusterName
+            type: string
+          - name: fbcFragment
+            type: string
+          - name: bundleImage
+            type: string
+          - name: packageName
+            type: string
+          - name: channelName
+            type: string
+          - name: testBundleRef
+            type: string
+          - name: certsuiteLabels
+            type: string
+        volumes:
+          - name: credentials
+            emptyDir: {}
+        steps:
+          # ── Step 1: Get kubeconfig from EaaS ─────────────────────────
+          - name: get-kubeconfig
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/build-definitions.git
+                - name: revision
+                  value: main
+                - name: pathInRepo
+                  value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
+            params:
+              - name: eaasSpaceSecretRef
+                value: $(params.eaasSpaceSecretRef)
+              - name: clusterName
+                value: $(params.clusterName)
+              - name: credentials
+                value: credentials
+
+          # ── Step 2: Deploy operator via OLM ──────────────────────────
+          - name: deploy-operator
+            image: quay.io/konflux-ci/konflux-test:v1.4.31@sha256:a7cae9e96663e277a3904d0c78630508ddb6cc8eebaa912a840bd20f68dcaad1
+            onError: continue
+            computeResources:
+              limits:
+                memory: 4Gi
+              requests:
+                memory: 4Gi
+                cpu: 500m
+            volumeMounts:
+              - name: credentials
+                mountPath: /credentials
+            env:
+              - name: KUBECONFIG
+                value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+              - name: FBC_FRAGMENT
+                value: "$(params.fbcFragment)"
+              - name: BUNDLE_IMAGE
+                value: "$(params.bundleImage)"
+              - name: PACKAGE_NAME
+                value: "$(params.packageName)"
+              - name: CHANNEL_NAME
+                value: "$(params.channelName)"
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              echo "[$(date -u +%FT%T.%3NZ)] Deploying operator: package=${PACKAGE_NAME} channel=${CHANNEL_NAME}"
+              oc whoami || { echo "ERROR: Cannot connect to cluster"; exit 1; }
+
+              if ! bundle_render_out=$(opm render "${BUNDLE_IMAGE}"); then
+                echo "ERROR: Failed to render bundle image" >&2
+                exit 1
+              fi
+
+              # Determine install namespace
+              INSTALL_NAMESPACE=$(echo "${bundle_render_out}" | \
+                jq -r 'select(.schema == "olm.bundle") | .properties[]? |
+                select(.type == "olm.bundle.object") | .value.data' 2>/dev/null | \
+                base64 -d 2>/dev/null | \
+                jq -r 'select(.kind == "ClusterServiceVersion") |
+                .metadata.annotations["operatorframework.io/suggested-namespace"] // empty' 2>/dev/null | \
+                head -1)
+
+              if [[ -z "${INSTALL_NAMESPACE}" || "${INSTALL_NAMESPACE}" == "null" ]]; then
+                INSTALL_NAMESPACE=$(oc create -f - -o jsonpath='{.metadata.name}' <<NS_EOF
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                generateName: oo-
+              NS_EOF
+                )
+              elif ! oc get namespace "${INSTALL_NAMESPACE}" &>/dev/null; then
+                oc create namespace "${INSTALL_NAMESPACE}"
+              fi
+
+              echo "[$(date -u +%FT%T.%3NZ)] Namespace: ${INSTALL_NAMESPACE}"
+              echo -n "${INSTALL_NAMESPACE}" > /workspace/install-namespace
+
+              # OperatorGroup
+              EXISTING_OG=$(oc -n "${INSTALL_NAMESPACE}" get operatorgroup -o jsonpath="{.items[*].metadata.name}" 2>/dev/null || true)
+              if [[ -z "${EXISTING_OG}" ]]; then
+                oc create -f - <<OG_EOF
+              apiVersion: operators.coreos.com/v1
+              kind: OperatorGroup
+              metadata:
+                generateName: oo-
+                namespace: ${INSTALL_NAMESPACE}
+              spec:
+                targetNamespaces: []
+              OG_EOF
+              fi
+
+              # CatalogSource
+              CATSRC=$(oc create -f - -o jsonpath='{.metadata.name}' <<CS_EOF
+              apiVersion: operators.coreos.com/v1alpha1
+              kind: CatalogSource
+              metadata:
+                generateName: oo-
+                namespace: ${INSTALL_NAMESPACE}
+              spec:
+                sourceType: grpc
+                image: ${FBC_FRAGMENT}
+                displayName: "Certsuite Test Catalog"
+                publisher: "konflux-certsuite"
+              CS_EOF
+              )
+
+              # Wait for CatalogSource
+              for i in $(seq 1 60); do
+                STATE=$(oc get catalogsource "${CATSRC}" -n "${INSTALL_NAMESPACE}" \
+                  -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null || echo "")
+                [[ "${STATE}" == "READY" ]] && break
+                [[ ${i} -eq 60 ]] && { echo "ERROR: CatalogSource not ready"; exit 1; }
+                sleep 10
+              done
+
+              # Bundle name + Subscription
+              BUNDLE_NAME=$(echo "${bundle_render_out}" | jq -r 'select(.schema == "olm.bundle") | .name' | head -1)
+
+              SUB=$(oc create -f - -o jsonpath='{.metadata.name}' <<SUB_EOF
+              apiVersion: operators.coreos.com/v1alpha1
+              kind: Subscription
+              metadata:
+                generateName: oo-
+                namespace: ${INSTALL_NAMESPACE}
+              spec:
+                channel: ${CHANNEL_NAME}
+                installPlanApproval: Automatic
+                name: ${PACKAGE_NAME}
+                source: ${CATSRC}
+                sourceNamespace: ${INSTALL_NAMESPACE}
+                startingCSV: ${BUNDLE_NAME}
+              SUB_EOF
+              )
+
+              # Wait for CSV
+              for i in $(seq 1 90); do
+                CSV=$(oc get subscription "${SUB}" -n "${INSTALL_NAMESPACE}" \
+                  -o jsonpath='{.status.installedCSV}' 2>/dev/null || echo "")
+                if [[ -n "${CSV}" ]]; then
+                  PHASE=$(oc get csv "${CSV}" -n "${INSTALL_NAMESPACE}" \
+                    -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+                  if [[ "${PHASE}" == "Succeeded" ]]; then
+                    echo "[$(date -u +%FT%T.%3NZ)] CSV '${CSV}' ready"
+                    exit 0
+                  fi
+                fi
+                sleep 10
+              done
+
+              echo "ERROR: Timed out waiting for CSV" >&2
+              exit 1
+
+          # ── Step 3: Deploy operands from test bundle ─────────────────
+          - name: deploy-operands
+            image: quay.io/openshift/origin-cli:latest
+            volumeMounts:
+              - name: credentials
+                mountPath: /credentials
+            env:
+              - name: KUBECONFIG
+                value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+              - name: TEST_BUNDLE_REF
+                value: "$(params.testBundleRef)"
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              INSTALL_NAMESPACE=""
+              [[ -f /workspace/install-namespace ]] && INSTALL_NAMESPACE=$(cat /workspace/install-namespace)
+
+              # Fetch test bundle
+              BUNDLE_DIR="/workspace/test-bundle"
+              mkdir -p "${BUNDLE_DIR}"
+
+              GIT_URL="${TEST_BUNDLE_REF%%#*}"
+              BUNDLE_PATH="${TEST_BUNDLE_REF#*#}"
+              [[ "${BUNDLE_PATH}" == "${TEST_BUNDLE_REF}" ]] && BUNDLE_PATH="."
+
+              echo "[$(date -u +%FT%T.%3NZ)] Cloning ${GIT_URL} (path: ${BUNDLE_PATH})"
+              CLONE_DIR=$(mktemp -d)
+              git clone --depth 1 "${GIT_URL}" "${CLONE_DIR}"
+              cp -r "${CLONE_DIR}/${BUNDLE_PATH}/." "${BUNDLE_DIR}/"
+              rm -rf "${CLONE_DIR}"
+
+              if [[ ! -f "${BUNDLE_DIR}/certsuite-test-bundle.yaml" ]]; then
+                echo "ERROR: certsuite-test-bundle.yaml not found" >&2
+                exit 1
+              fi
+
+              # Determine target namespace
+              TARGET_NS=$(grep -A1 'namespace:' "${BUNDLE_DIR}/certsuite-test-bundle.yaml" | tail -1 | awk '{print $NF}' || echo "")
+              TARGET_NS="${TARGET_NS:-${INSTALL_NAMESPACE}}"
+
+              echo "[$(date -u +%FT%T.%3NZ)] Deploying operands to: ${TARGET_NS}"
+
+              if [[ -n "${TARGET_NS}" && "${TARGET_NS}" != "${INSTALL_NAMESPACE}" ]]; then
+                oc create namespace "${TARGET_NS}" 2>/dev/null || true
+              fi
+
+              # Apply prerequisites
+              if [[ -d "${BUNDLE_DIR}/prerequisites" ]]; then
+                oc apply -n "${TARGET_NS}" -f "${BUNDLE_DIR}/prerequisites/" 2>/dev/null || true
+              fi
+
+              # Apply operands
+              if [[ -d "${BUNDLE_DIR}/operands" ]]; then
+                oc apply -n "${TARGET_NS}" -f "${BUNDLE_DIR}/operands/"
+              fi
+
+              # Wait for deployments
+              DEPS=$(oc get deployments -n "${TARGET_NS}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+              for DEP in ${DEPS}; do
+                echo "  Waiting for deployment/${DEP}..."
+                oc rollout status "deployment/${DEP}" -n "${TARGET_NS}" --timeout=300s || true
+              done
+
+              echo "[$(date -u +%FT%T.%3NZ)] Operand deployment complete"
+
+          # ── Step 4: Run certsuite ────────────────────────────────────
+          - name: run-certsuite
+            image: quay.io/redhat-best-practices-for-k8s/certsuite:latest
+            onError: continue
+            computeResources:
+              limits:
+                memory: 4Gi
+              requests:
+                memory: 2Gi
+                cpu: 500m
+            volumeMounts:
+              - name: credentials
+                mountPath: /credentials
+            env:
+              - name: KUBECONFIG
+                value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+              - name: CERTSUITE_LABELS
+                value: "$(params.certsuiteLabels)"
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              RESULTS_DIR="/workspace/results"
+              CONFIG_FILE="/workspace/test-bundle/certsuite_config.yml"
+              mkdir -p "${RESULTS_DIR}"
+
+              if [[ ! -f "${CONFIG_FILE}" ]]; then
+                echo "WARNING: No certsuite_config.yml in test bundle. Using default."
+                CONFIG_FILE=""
+              fi
+
+              CONFIG_ARGS=""
+              if [[ -n "${CONFIG_FILE}" ]]; then
+                CONFIG_ARGS="--config-file ${CONFIG_FILE}"
+              fi
+
+              if [[ -z "${CERTSUITE_LABELS}" ]]; then
+                SUITE_DIR="${RESULTS_DIR}/all"
+                mkdir -p "${SUITE_DIR}"
+                echo "[$(date -u +%FT%T.%3NZ)] Running all certsuite tests"
+
+                set +e
+                certsuite run \
+                  --output-dir "${SUITE_DIR}" \
+                  ${CONFIG_ARGS} \
+                  2>&1 | tee "${SUITE_DIR}/certsuite.log"
+                set -e
+              else
+                IFS=',' read -ra LABELS <<< "${CERTSUITE_LABELS}"
+                for LABEL in "${LABELS[@]}"; do
+                  LABEL=$(echo "${LABEL}" | xargs)
+                  SUITE_DIR="${RESULTS_DIR}/${LABEL}"
+                  mkdir -p "${SUITE_DIR}"
+
+                  echo "[$(date -u +%FT%T.%3NZ)] Running: ${LABEL}"
+                  set +e
+                  certsuite run \
+                    --label-filter "${LABEL}" \
+                    --output-dir "${SUITE_DIR}" \
+                    ${CONFIG_ARGS} \
+                    2>&1 | tee "${SUITE_DIR}/certsuite.log"
+                  set -e
+                done
+              fi
+
+              # Print summary
+              for CLAIM in "${RESULTS_DIR}"/*/claim.json; do
+                [[ -f "${CLAIM}" ]] || continue
+                SUITE=$(basename "$(dirname "${CLAIM}")")
+                TOTAL=$(jq '.claim.results | length' "${CLAIM}" 2>/dev/null || echo "?")
+                PASSED=$(jq '[.claim.results[] | select(.state == "passed")] | length' "${CLAIM}" 2>/dev/null || echo "?")
+                FAILED=$(jq '[.claim.results[] | select(.state == "failed")] | length' "${CLAIM}" 2>/dev/null || echo "?")
+                echo "[$(date -u +%FT%T.%3NZ)] ${SUITE}: total=${TOTAL} passed=${PASSED} failed=${FAILED}"
+              done
+
+    # ── 7. Collect Results ─────────────────────────────────────────────
+    - name: collect-results
+      runAfter:
+        - deploy-and-test
+      when:
+        - input: $(tasks.parse-metadata.results.test-event-type)
+          operator: in
+          values: ["push", "Push"]
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/collect-results/0.1/collect-results.yaml
+      params:
+        - name: CERT_TRACK_URL
+          value: $(params.CERT_TRACK_URL)
+        - name: CERT_TRACK_SECRET_NAME
+          value: $(params.CERT_TRACK_SECRET_NAME)
+        - name: CERT_TRACK_SECRET_KEY
+          value: $(params.CERT_TRACK_SECRET_KEY)
+        - name: RELEASE_VERSION
+          value: "$(tasks.parse-metadata.results.source-git-revision)"
+        - name: OPERATOR_NAME
+          value: "$(tasks.get-unreleased-bundle.results.packageName)"
+        - name: OCI_REF
+          value: $(params.OCI_REF)
+        - name: CREDENTIALS_SECRET_NAME
+          value: $(params.CREDENTIALS_SECRET_NAME)
+      workspaces:
+        - name: shared
+          workspace: shared
+
+  workspaces:
+    - name: shared
+      description: Shared workspace for results

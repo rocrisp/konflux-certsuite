@@ -6,39 +6,57 @@ metadata:
     app.kubernetes.io/part-of: konflux-certsuite
 spec:
   description: |
-    Collects certsuite results and pushes them to two destinations:
-    1. cert-track-results web app via API (POST /api/v1/claim)
-    2. OCI artifact registry as a tarball backup
+    Collects certsuite results. Optionally pushes them to:
+    1. cert-track-results web app via API (when CERT_TRACK_URL is set)
+    2. OCI artifact registry as a tarball (when OCI_REF is set)
   params:
     - name: CERT_TRACK_URL
       type: string
-      description: Base URL of the cert-track-results instance
+      default: ""
     - name: CERT_TRACK_SECRET_NAME
       type: string
-      description: Secret containing the API token
+      default: ""
     - name: CERT_TRACK_SECRET_KEY
       type: string
       default: "api-token"
     - name: RELEASE_VERSION
       type: string
-      description: Release version for cert-track-results (e.g. "4.20")
+      default: ""
     - name: OPERATOR_NAME
       type: string
-      description: Operator name for cert-track-results
+      default: ""
     - name: OCI_REF
       type: string
-      description: OCI artifact reference (quay.io/org/repo:tag)
+      default: ""
     - name: CREDENTIALS_SECRET_NAME
       type: string
-      description: Secret with OCI registry credentials
+      default: ""
   workspaces:
     - name: shared
       description: Shared workspace containing results/
-  volumes:
-    - name: oci-auth
-      secret:
-        secretName: $(params.CREDENTIALS_SECRET_NAME)
   steps:
+    - name: summary
+      image: quay.io/openshift/origin-cli:latest
+      workingDir: $(workspaces.shared.path)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        RESULTS_DIR="$(workspaces.shared.path)/results"
+        echo "[$(date -u +%FT%T.%3NZ)] Results summary:"
+
+        for CLAIM_FILE in "${RESULTS_DIR}"/*/claim.json; do
+          [[ -f "${CLAIM_FILE}" ]] || continue
+          SUITE=$(basename "$(dirname "${CLAIM_FILE}")")
+          TOTAL=$(jq '.claim.results | length' "${CLAIM_FILE}" 2>/dev/null || echo "?")
+          PASSED=$(jq '[.claim.results[] | select(.state == "passed")] | length' "${CLAIM_FILE}" 2>/dev/null || echo "?")
+          FAILED=$(jq '[.claim.results[] | select(.state == "failed")] | length' "${CLAIM_FILE}" 2>/dev/null || echo "?")
+          echo "  ${SUITE}: total=${TOTAL} passed=${PASSED} failed=${FAILED}"
+        done
+
+        if ! ls "${RESULTS_DIR}"/*/claim.json &>/dev/null; then
+          echo "  WARNING: No claim.json files found"
+        fi
     - name: push-to-cert-track
       image: quay.io/openshift/origin-cli:latest
       workingDir: $(workspaces.shared.path)
@@ -57,17 +75,26 @@ spec:
         #!/usr/bin/env bash
         set -euo pipefail
 
-        RESULTS_DIR="$(workspaces.shared.path)/results"
-
-        API_TOKEN=$(kubectl get secret "${CERT_TRACK_SECRET_NAME}" \
-          -o jsonpath="{.data.${CERT_TRACK_SECRET_KEY}}" | base64 -d)
-
-        if [[ -z "${API_TOKEN}" ]]; then
-          echo "WARNING: No API token found. Skipping cert-track upload."
+        if [[ -z "${CERT_TRACK_URL}" ]]; then
+          echo "[$(date -u +%FT%T.%3NZ)] CERT_TRACK_URL not set. Skipping cert-track upload."
           exit 0
         fi
 
-        # Upload each suite's claim.json
+        if [[ -z "${CERT_TRACK_SECRET_NAME}" ]]; then
+          echo "[$(date -u +%FT%T.%3NZ)] CERT_TRACK_SECRET_NAME not set. Skipping cert-track upload."
+          exit 0
+        fi
+
+        RESULTS_DIR="$(workspaces.shared.path)/results"
+
+        API_TOKEN=$(kubectl get secret "${CERT_TRACK_SECRET_NAME}" \
+          -o jsonpath="{.data.${CERT_TRACK_SECRET_KEY}}" 2>/dev/null | base64 -d 2>/dev/null || echo "")
+
+        if [[ -z "${API_TOKEN}" ]]; then
+          echo "WARNING: Could not read API token. Skipping cert-track upload."
+          exit 0
+        fi
+
         for CLAIM_FILE in "${RESULTS_DIR}"/*/claim.json; do
           [[ -f "${CLAIM_FILE}" ]] || continue
           SUITE_NAME=$(basename "$(dirname "${CLAIM_FILE}")")
@@ -83,27 +110,29 @@ spec:
 
           if [[ "${HTTP_CODE}" -ge 200 && "${HTTP_CODE}" -lt 300 ]]; then
             echo "  Upload successful (HTTP ${HTTP_CODE})"
-            cat /tmp/response.json
           else
             echo "  WARNING: Upload failed (HTTP ${HTTP_CODE})"
-            cat /tmp/response.json || true
+            cat /tmp/response.json 2>/dev/null || true
           fi
         done
     - name: push-to-oci
       image: quay.io/konflux-ci/konflux-test:v1.4.31@sha256:a7cae9e96663e277a3904d0c78630508ddb6cc8eebaa912a840bd20f68dcaad1
       workingDir: $(workspaces.shared.path)
-      volumeMounts:
-        - name: oci-auth
-          mountPath: /auth
       env:
         - name: OCI_REF
           value: "$(params.OCI_REF)"
+        - name: CREDENTIALS_SECRET_NAME
+          value: "$(params.CREDENTIALS_SECRET_NAME)"
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
 
-        RESULTS_DIR="$(workspaces.shared.path)/results"
+        if [[ -z "${OCI_REF}" || -z "${CREDENTIALS_SECRET_NAME}" ]]; then
+          echo "[$(date -u +%FT%T.%3NZ)] OCI_REF or CREDENTIALS_SECRET_NAME not set. Skipping OCI push."
+          exit 0
+        fi
 
+        RESULTS_DIR="$(workspaces.shared.path)/results"
         if [[ ! -d "${RESULTS_DIR}" ]]; then
           echo "WARNING: No results directory found. Skipping OCI push."
           exit 0
@@ -112,12 +141,23 @@ spec:
         echo "[$(date -u +%FT%T.%3NZ)] Pushing results to OCI: ${OCI_REF}"
 
         mkdir -p /home/tool-box/.docker
-        cp /auth/oci-storage-dockerconfigjson /home/tool-box/.docker/config.json 2>/dev/null || \
-          cp /auth/.dockerconfigjson /home/tool-box/.docker/config.json 2>/dev/null || true
+        # Try to read OCI credentials from the secret
+        OCI_AUTH=$(kubectl get secret "${CREDENTIALS_SECRET_NAME}" \
+          -o jsonpath='{.data.oci-storage-dockerconfigjson}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+        if [[ -z "${OCI_AUTH}" ]]; then
+          OCI_AUTH=$(kubectl get secret "${CREDENTIALS_SECRET_NAME}" \
+            -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+        fi
+
+        if [[ -z "${OCI_AUTH}" ]]; then
+          echo "WARNING: Could not read OCI credentials. Skipping OCI push."
+          exit 0
+        fi
+
+        echo "${OCI_AUTH}" > /home/tool-box/.docker/config.json
 
         cd "$(workspaces.shared.path)"
         tar czf /tmp/results.tar.gz results/
-
         oras push "${OCI_REF}" /tmp/results.tar.gz:application/gzip
 
         echo "[$(date -u +%FT%T.%3NZ)] OCI push complete"
