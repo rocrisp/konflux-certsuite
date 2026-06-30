@@ -16,6 +16,9 @@ spec:
   params:
     - name: KUBECONFIG_SECRET_NAME
       value: "shared-cluster-kubeconfig"
+    # For testing with a custom cluster, set KUBECONFIG_VALUE instead:
+    # - name: KUBECONFIG_VALUE
+    #   value: "<base64-encoded-kubeconfig>"
     - name: TEST_BUNDLE_REF
       value: "https://github.com/<REPLACE:org>/<REPLACE:repo>.git#certsuite-test-bundle"
     # CERTSUITE_LABELS is optional. Omit or leave empty to run all tests.

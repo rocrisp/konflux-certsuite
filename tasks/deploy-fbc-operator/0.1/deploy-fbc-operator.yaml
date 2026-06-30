@@ -10,6 +10,12 @@ spec:
     cluster. Creates Namespace, OperatorGroup, CatalogSource, and
     Subscription, then waits for the CSV to reach Succeeded phase.
   params:
+    - name: KUBECONFIG_SECRET_NAME
+      type: string
+      description: Name of the Secret containing the shared cluster kubeconfig
+    - name: KUBECONFIG_SECRET_KEY
+      type: string
+      default: "kubeconfig"
     - name: FBC_FRAGMENT
       type: string
       description: Container image of the FBC fragment
@@ -32,11 +38,21 @@ spec:
   workspaces:
     - name: shared
       description: Shared workspace for passing data between tasks
+  volumes:
+    - name: kubeconfig
+      secret:
+        secretName: $(params.KUBECONFIG_SECRET_NAME)
   steps:
     - name: deploy
       image: quay.io/konflux-ci/konflux-test:v1.4.31@sha256:a7cae9e96663e277a3904d0c78630508ddb6cc8eebaa912a840bd20f68dcaad1
       workingDir: $(workspaces.shared.path)
+      volumeMounts:
+        - name: kubeconfig
+          mountPath: /credentials
+          readOnly: true
       env:
+        - name: KUBECONFIG
+          value: "/credentials/$(params.KUBECONFIG_SECRET_KEY)"
         - name: FBC_FRAGMENT
           value: "$(params.FBC_FRAGMENT)"
         - name: BUNDLE_IMAGE
