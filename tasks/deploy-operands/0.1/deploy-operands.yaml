@@ -11,6 +11,12 @@ spec:
     software-only operand instances that exercise the full operator scope
     without hardware or license dependencies.
   params:
+    - name: KUBECONFIG_SECRET_NAME
+      type: string
+      description: Name of the Secret containing the shared cluster kubeconfig
+    - name: KUBECONFIG_SECRET_KEY
+      type: string
+      default: "kubeconfig"
     - name: TEST_BUNDLE_REF
       type: string
       description: |
@@ -28,6 +34,10 @@ spec:
   workspaces:
     - name: shared
       description: Shared workspace for passing data between tasks
+  volumes:
+    - name: kubeconfig
+      secret:
+        secretName: $(params.KUBECONFIG_SECRET_NAME)
   steps:
     - name: fetch-bundle
       image: quay.io/openshift/origin-cli:latest
@@ -60,7 +70,13 @@ spec:
     - name: deploy
       image: quay.io/openshift/origin-cli:latest
       workingDir: $(workspaces.shared.path)
+      volumeMounts:
+        - name: kubeconfig
+          mountPath: /credentials
+          readOnly: true
       env:
+        - name: KUBECONFIG
+          value: "/credentials/$(params.KUBECONFIG_SECRET_KEY)"
         - name: INSTALL_NAMESPACE
           value: "$(params.INSTALL_NAMESPACE)"
         - name: READINESS_TIMEOUT

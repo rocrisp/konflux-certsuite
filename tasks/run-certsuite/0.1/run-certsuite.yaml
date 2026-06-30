@@ -10,6 +10,12 @@ spec:
     against the deployed operator. Iterates over comma-separated test
     labels and produces a claim.json for each suite.
   params:
+    - name: KUBECONFIG_SECRET_NAME
+      type: string
+      description: Name of the Secret containing the shared cluster kubeconfig
+    - name: KUBECONFIG_SECRET_KEY
+      type: string
+      default: "kubeconfig"
     - name: CERTSUITE_LABELS
       type: string
       default: ""
@@ -21,10 +27,18 @@ spec:
       default: "quay.io/redhat-best-practices-for-k8s/certsuite:latest"
   workspaces:
     - name: shared
-      description: Shared workspace containing certsuite_config.yml and kubeconfig
+      description: Shared workspace containing certsuite_config.yml
+  volumes:
+    - name: kubeconfig
+      secret:
+        secretName: $(params.KUBECONFIG_SECRET_NAME)
   steps:
     - name: run
       image: "$(params.CERTSUITE_IMAGE)"
+      volumeMounts:
+        - name: kubeconfig
+          mountPath: /credentials
+          readOnly: true
       onError: continue
       workingDir: $(workspaces.shared.path)
       computeResources:
@@ -34,6 +48,8 @@ spec:
           memory: 2Gi
           cpu: 500m
       env:
+        - name: KUBECONFIG
+          value: "/credentials/$(params.KUBECONFIG_SECRET_KEY)"
         - name: CERTSUITE_LABELS
           value: "$(params.CERTSUITE_LABELS)"
       script: |

@@ -86,8 +86,9 @@ Before any pipeline run the shared cluster must have:
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `SNAPSHOT` | yes | -- | Konflux ApplicationSnapshot JSON |
-| `KUBECONFIG_SECRET_NAME` | yes | -- | Secret holding the shared cluster kubeconfig |
+| `KUBECONFIG_SECRET_NAME` | no | `shared-cluster-kubeconfig` | Secret holding the shared cluster kubeconfig |
 | `KUBECONFIG_SECRET_KEY` | no | `kubeconfig` | Key inside the secret |
+| `KUBECONFIG_VALUE` | no | `""` | Base64-encoded kubeconfig (testing only; auto-creates a temporary Secret) |
 | `TEST_BUNDLE_REF` | yes | -- | Git URL or OCI ref to the operator test bundle |
 | `CERTSUITE_LABELS` | no | `""` (all) | Comma-separated certsuite labels; empty runs all tests |
 | `OADP_BACKUP_NAME` | yes | -- | OADP Backup name to restore from |

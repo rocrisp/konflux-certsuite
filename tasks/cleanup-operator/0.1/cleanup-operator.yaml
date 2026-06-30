@@ -10,6 +10,12 @@ spec:
     CSV, CatalogSource, OperatorGroup, operator-installed CRDs, and the
     install namespace.
   params:
+    - name: KUBECONFIG_SECRET_NAME
+      type: string
+      description: Name of the Secret containing the shared cluster kubeconfig
+    - name: KUBECONFIG_SECRET_KEY
+      type: string
+      default: "kubeconfig"
     - name: INSTALL_NAMESPACE
       type: string
       default: ""
@@ -28,10 +34,20 @@ spec:
     - name: CLEANUP_TIMEOUT
       type: string
       default: "300"
+  volumes:
+    - name: kubeconfig
+      secret:
+        secretName: $(params.KUBECONFIG_SECRET_NAME)
   steps:
     - name: cleanup
       image: quay.io/openshift/origin-cli:latest
+      volumeMounts:
+        - name: kubeconfig
+          mountPath: /credentials
+          readOnly: true
       env:
+        - name: KUBECONFIG
+          value: "/credentials/$(params.KUBECONFIG_SECRET_KEY)"
         - name: INSTALL_NAMESPACE
           value: "$(params.INSTALL_NAMESPACE)"
         - name: CATSRC_NAME

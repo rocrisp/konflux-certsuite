@@ -9,6 +9,12 @@ spec:
     Creates an OADP (Velero) Restore CR from a named backup and polls
     until the restore completes or times out.
   params:
+    - name: KUBECONFIG_SECRET_NAME
+      type: string
+      description: Name of the Secret containing the shared cluster kubeconfig
+    - name: KUBECONFIG_SECRET_KEY
+      type: string
+      default: "kubeconfig"
     - name: BACKUP_NAME
       type: string
       description: Name of the OADP Backup to restore from
@@ -22,10 +28,20 @@ spec:
       type: string
       default: ""
       description: Optional suffix for the restore name (use 'pre' or 'post')
+  volumes:
+    - name: kubeconfig
+      secret:
+        secretName: $(params.KUBECONFIG_SECRET_NAME)
   steps:
     - name: restore
       image: quay.io/openshift/origin-cli:latest
+      volumeMounts:
+        - name: kubeconfig
+          mountPath: /credentials
+          readOnly: true
       env:
+        - name: KUBECONFIG
+          value: "/credentials/$(params.KUBECONFIG_SECRET_KEY)"
         - name: BACKUP_NAME
           value: "$(params.BACKUP_NAME)"
         - name: OADP_NAMESPACE
