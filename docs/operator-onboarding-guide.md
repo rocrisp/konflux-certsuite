@@ -8,23 +8,28 @@ Konflux certsuite shared test pipeline.
 
 A test bundle is a directory in your operator's git repository that
 contains everything needed to deploy a **software-only** version of
-your operator's workloads for certsuite testing. "Software-only" means:
+your operator's workloads for testing. "Software-only" means:
 
-- No specialized hardware (SR-IOV NICs, GPUs, FPGAs)
+- No specialized hardware (SR-IOV NICs, GPUs, FPGAs, PTP clocks)
 - No license keys or entitlements
 - No external service dependencies (cloud APIs, databases)
 - No PersistentVolumes requiring specific storage classes
 
 The goal is a portable, self-contained set of manifests that deploys
-your operator's operands on any OpenShift cluster so that certsuite
-can validate best-practices compliance.
+your operator's operands on any OpenShift cluster so the pipeline can
+verify the operator is properly deployed and then run certsuite against
+it.
+
+The test bundle is **not** responsible for certsuite configuration --
+that is managed separately via the `CERTSUITE_CONFIG_SECRET` pipeline
+parameter. By default, the pipeline runs **all** certsuite tests
+unless a subset is specified via `CERTSUITE_LABELS`.
 
 ## Bundle Directory Structure
 
 ```
-certsuite-test-bundle/
+my-operator-test-bundle/
   certsuite-test-bundle.yaml       # Required: bundle metadata
-  certsuite_config.yml             # Required: certsuite configuration
   operands/                        # Required: operand manifests
     my-custom-resource.yaml        #   Your operator's CR instances
     deployment.yaml                #   Any additional workloads
@@ -49,37 +54,32 @@ spec:
   namespace: ""
 
   description: |
-    Software-only test deployment of my-operator for certsuite.
+    Software-only test deployment of my-operator.
 
-  operator:
-    packageName: my-operator       # Must match your OLM package name
-    channel: stable                # Channel used for testing
-
+  # The pipeline waits for these resources to become Ready
+  # before running certsuite.
   readiness:
     timeout: 300                   # Seconds to wait for operands
     checks:
       - kind: Deployment
         name: my-controller
-      - kind: StatefulSet
-        name: my-datastore
-
-  certsuite:
-    labels:
-      - "networking"
-      - "lifecycle"
-      - "access-control"
+      - kind: DaemonSet
+        name: my-agent
 ```
+
+The operator's package name and channel are **not** specified here --
+Konflux determines those from the FBC fragment in the Snapshot.
 
 ## Step 2: Create Operand Manifests
 
 Place Kubernetes manifests in the `operands/` directory. These are
 applied with `oc apply -f operands/` after the operator is installed.
 
-### Guidelines for Software-Only Operands
+### Custom Resources
 
-**Custom Resources**: Create minimal CR instances that your operator
-will reconcile. Use test/development profiles if your operator supports
-them:
+If your operator reconciles Custom Resources, create minimal CR
+instances that your operator will reconcile. Use test/development
+profiles if your operator supports them:
 
 ```yaml
 # operands/my-app.yaml
@@ -87,8 +87,6 @@ apiVersion: myoperator.example.com/v1
 kind: MyApp
 metadata:
   name: test-instance
-  labels:
-    redhat-best-practices-for-k8s.com/generic: target
 spec:
   replicas: 1
   profile: test         # Use a lightweight profile
@@ -99,8 +97,10 @@ spec:
     external-auth: false
 ```
 
-**Deployments**: If your operator doesn't auto-create workloads from
-CRs, include explicit Deployments:
+### Direct Workloads
+
+If your operator does not auto-create workloads from CRs, include
+explicit Deployment manifests:
 
 ```yaml
 # operands/workload.yaml
@@ -110,7 +110,6 @@ metadata:
   name: my-workload
   labels:
     app: my-workload
-    redhat-best-practices-for-k8s.com/generic: target
 spec:
   replicas: 1
   selector:
@@ -120,7 +119,6 @@ spec:
     metadata:
       labels:
         app: my-workload
-        redhat-best-practices-for-k8s.com/generic: target
     spec:
       containers:
         - name: app
@@ -133,20 +131,7 @@ spec:
             limits:
               cpu: 200m
               memory: 256Mi
-          securityContext:
-            runAsNonRoot: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
 ```
-
-**Important labels**: certsuite discovers workloads via labels. Make sure
-your pods have the labels referenced in `certsuite_config.yml`:
-
-- `redhat-best-practices-for-k8s.com/generic: target` for pods
-- `redhat-best-practices-for-k8s.com/operator: target` for operator CSVs
 
 ### What to Avoid
 
@@ -162,29 +147,7 @@ or other elevated permissions. Certsuite will flag these, but they can be
 addressed with exceptions in cert-track-results. Do not change your
 operator's actual requirements just to pass validation.
 
-## Step 3: Create the Certsuite Configuration
-
-Create `certsuite_config.yml` to tell certsuite which workloads to test:
-
-```yaml
-targetNameSpaces:
-  - name: ""   # Filled in by the pipeline
-
-podsUnderTestLabels:
-  - "redhat-best-practices-for-k8s.com/generic: target"
-
-operatorsUnderTestLabels:
-  - "redhat-best-practices-for-k8s.com/operator: target"
-
-targetCrdFilters:
-  - nameSuffix: "myoperator.example.com"
-    scalable: false
-```
-
-See the [certsuite configuration docs](https://redhat-best-practices-for-k8s.github.io/certsuite/configuration/)
-for all available options.
-
-## Step 4: Add Prerequisites (Optional)
+## Step 3: Add Prerequisites (Optional)
 
 If your operands need Secrets, ConfigMaps, or RBAC resources before
 they can start, place them in a `prerequisites/` directory:
@@ -202,20 +165,19 @@ data:
 
 These are applied before the operand manifests.
 
-## Step 5: Validate Locally
+## Step 4: Validate Locally
 
 Use the provided validation tool to check your bundle before pushing:
 
 ```bash
 # From the konflux-certsuite repository
-./tools/validate-test-bundle.sh /path/to/your/certsuite-test-bundle
+./tools/validate-test-bundle.sh /path/to/your/test-bundle
 ```
 
 The tool checks:
 - `certsuite-test-bundle.yaml` exists and has required fields
 - `operands/` directory exists and contains at least one manifest
-- `certsuite_config.yml` exists and is valid YAML
-- Pod manifests include the required certsuite labels
+- YAML syntax is valid
 
 ### Test Against a Local Cluster
 
@@ -224,35 +186,30 @@ For a more thorough local test:
 ```bash
 # 1. Install your operator on a test cluster
 # 2. Apply the bundle manifests
-oc apply -f certsuite-test-bundle/prerequisites/ 2>/dev/null || true
-oc apply -f certsuite-test-bundle/operands/
+oc apply -f my-test-bundle/prerequisites/ 2>/dev/null || true
+oc apply -f my-test-bundle/operands/
 
 # 3. Wait for readiness
 oc rollout status deployment/my-workload
 
-# 4. Run certsuite locally
-certsuite run \
-  --label-filter "networking" \
-  --config-file certsuite-test-bundle/certsuite_config.yml \
-  --output-dir /tmp/certsuite-results
+# 4. Verify the operator reconciled your CRs
+oc get <your-cr-kind> -n <namespace>
 ```
 
-## Step 6: Scaffold with the CLI Tool
+## Step 5: Scaffold with the CLI Tool
 
 To generate a boilerplate test bundle:
 
 ```bash
 ./tools/scaffold-test-bundle.sh \
   --name my-operator \
-  --package my-operator \
-  --channel stable \
   --output /path/to/output
 ```
 
 This creates a complete bundle directory with placeholder manifests
 that you can customize.
 
-## Step 7: Onboard to Konflux
+## Step 6: Onboard to Konflux
 
 1. **Push the test bundle** to a directory in your operator's git
    repository (e.g. `certsuite-test-bundle/`).
@@ -263,6 +220,11 @@ that you can customize.
    # Shared cluster kubeconfig
    oc create secret generic shared-cluster-kubeconfig \
      --from-file=kubeconfig=/path/to/kubeconfig \
+     -n <tenant-namespace>
+
+   # Certsuite configuration
+   oc create secret generic certsuite-config \
+     --from-file=certsuite_config.yml=/path/to/certsuite_config.yml \
      -n <tenant-namespace>
 
    # cert-track-results API token
@@ -286,19 +248,33 @@ that you can customize.
    Key parameters to set:
    - `TEST_BUNDLE_REF`: Git URL to your test bundle, e.g.
      `https://github.com/org/repo.git#certsuite-test-bundle`
-   - `CERTSUITE_LABELS`: Which test suites to run
-   - `CERT_TRACK_URL`: URL of the cert-track-results instance
+   - `CERTSUITE_CONFIG_SECRET`: Name of the secret containing your
+     certsuite_config.yml
+   - `CERTSUITE_LABELS`: (Optional) Comma-separated test labels.
+     Leave empty to run all tests.
 
 4. **Merge a change** to your FBC component. The pipeline triggers
    automatically on push events.
+
+## Example: ptp-operator
+
+The ptp-operator test bundle at
+[examples/ptp-operator-test-bundle/](../examples/ptp-operator-test-bundle/)
+demonstrates a real-world bundle:
+
+- **PtpOperatorConfig** patches the default config to schedule
+  linuxptp-daemon on worker nodes
+- **PtpConfig** uses software-only mode (`time_stamping: software`,
+  `free_running: 1`) so no PTP-capable NICs are required
+- The operator reconciles these CRs and creates the linuxptp-daemon
+  DaemonSet, which is enough to verify proper deployment
 
 ## Troubleshooting
 
 | Issue | Cause | Fix |
 |-------|-------|-----|
 | "certsuite-test-bundle.yaml not found" | Wrong `TEST_BUNDLE_REF` path | Check the `#path` fragment in the ref |
-| Operands never become Ready | Missing dependencies or bad config | Test locally first (Step 5) |
-| Certsuite finds 0 pods | Labels don't match config | Verify `podsUnderTestLabels` in config |
+| Operands never become Ready | Missing dependencies or bad config | Test locally first (Step 4) |
 | Lock timeout | Another pipeline is running | Increase `LOCK_TIMEOUT` or wait |
 | OADP restore fails | Backup expired or missing | Recreate the baseline backup |
 

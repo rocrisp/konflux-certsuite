@@ -3,6 +3,10 @@ set -euo pipefail
 
 # Validates a certsuite test bundle directory for correctness.
 #
+# The test bundle is responsible for deploying operator operands and
+# verifying the operator is properly deployed. It does NOT contain
+# certsuite configuration (that is managed separately).
+#
 # Usage:
 #   ./validate-test-bundle.sh /path/to/certsuite-test-bundle
 
@@ -39,12 +43,6 @@ else
   fail "certsuite-test-bundle.yaml not found"
 fi
 
-if [[ -f "${BUNDLE_DIR}/certsuite_config.yml" ]]; then
-  pass "certsuite_config.yml exists"
-else
-  fail "certsuite_config.yml not found"
-fi
-
 if [[ -d "${BUNDLE_DIR}/operands" ]]; then
   MANIFEST_COUNT=$(find "${BUNDLE_DIR}/operands" -name "*.yaml" -o -name "*.yml" 2>/dev/null | wc -l | tr -d ' ')
   if [[ ${MANIFEST_COUNT} -gt 0 ]]; then
@@ -61,48 +59,20 @@ echo ""
 echo "Bundle manifest:"
 
 if [[ -f "${BUNDLE_DIR}/certsuite-test-bundle.yaml" ]]; then
-  # Check required fields
   if grep -q "kind: TestBundle" "${BUNDLE_DIR}/certsuite-test-bundle.yaml"; then
     pass "kind: TestBundle"
   else
     fail "Missing 'kind: TestBundle'"
   fi
 
-  if grep -q "packageName:" "${BUNDLE_DIR}/certsuite-test-bundle.yaml"; then
-    pass "operator.packageName is set"
-  else
-    fail "Missing operator.packageName"
-  fi
-
   if grep -q "name:" "${BUNDLE_DIR}/certsuite-test-bundle.yaml" | head -1; then
     pass "metadata.name is set"
   fi
-fi
 
-# ── Certsuite config checks ───────────────────────────────────────────
-echo ""
-echo "Certsuite config:"
-
-if [[ -f "${BUNDLE_DIR}/certsuite_config.yml" ]]; then
-  # Validate YAML syntax
-  if python3 -c "import yaml; yaml.safe_load(open('${BUNDLE_DIR}/certsuite_config.yml'))" 2>/dev/null; then
-    pass "Valid YAML syntax"
-  elif ruby -e "require 'yaml'; YAML.load_file('${BUNDLE_DIR}/certsuite_config.yml')" 2>/dev/null; then
-    pass "Valid YAML syntax"
+  if grep -q "readiness:" "${BUNDLE_DIR}/certsuite-test-bundle.yaml"; then
+    pass "readiness checks defined"
   else
-    warn "Could not validate YAML syntax (python3/ruby not available)"
-  fi
-
-  if grep -q "targetNameSpaces:" "${BUNDLE_DIR}/certsuite_config.yml"; then
-    pass "targetNameSpaces is configured"
-  else
-    fail "Missing targetNameSpaces"
-  fi
-
-  if grep -q "podsUnderTestLabels:" "${BUNDLE_DIR}/certsuite_config.yml"; then
-    pass "podsUnderTestLabels is configured"
-  else
-    warn "Missing podsUnderTestLabels (certsuite may not discover any pods)"
+    warn "No readiness checks defined (pipeline may not wait for operands)"
   fi
 fi
 
@@ -111,29 +81,23 @@ echo ""
 echo "Operand manifests:"
 
 if [[ -d "${BUNDLE_DIR}/operands" ]]; then
-  CERTSUITE_LABEL="redhat-best-practices-for-k8s.com/generic"
-  HAS_LABEL=false
+  HAS_CR=false
 
   for f in "${BUNDLE_DIR}/operands"/*.yaml "${BUNDLE_DIR}/operands"/*.yml; do
     [[ -f "${f}" ]] || continue
     BASENAME=$(basename "${f}")
+    HAS_CR=true
 
-    # Check for certsuite discovery labels
-    if grep -q "${CERTSUITE_LABEL}" "${f}" 2>/dev/null; then
-      HAS_LABEL=true
-    fi
-
-    if grep -q "nodeSelector:" "${f}" 2>/dev/null; then
-      warn "${BASENAME}: has nodeSelector (may not match test cluster nodes)"
+    # Validate YAML syntax
+    if command -v python3 &>/dev/null; then
+      if ! python3 -c "import yaml; yaml.safe_load(open('${f}'))" 2>/dev/null; then
+        warn "${BASENAME}: invalid YAML syntax"
+      fi
     fi
   done
 
-  if ${HAS_LABEL}; then
-    pass "At least one manifest has certsuite discovery label"
-  else
-    fail "No manifest has the '${CERTSUITE_LABEL}' label"
-    echo "        Pods must be labeled for certsuite to discover them."
-    echo "        Add: redhat-best-practices-for-k8s.com/generic: target"
+  if ${HAS_CR}; then
+    pass "Operand manifests found"
   fi
 fi
 

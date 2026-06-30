@@ -1,7 +1,13 @@
-# Certsuite configuration for the example operator test bundle.
-# See https://redhat-best-practices-for-k8s.github.io/certsuite/configuration/
+# Certsuite configuration for the example operator.
+#
+# NOTE: This file is provided as a reference. In production, certsuite
+# configuration should be stored as a Kubernetes Secret and referenced
+# via the CERTSUITE_CONFIG_SECRET pipeline parameter -- NOT bundled
+# inside the test bundle.
+#
+# See: https://redhat-best-practices-for-k8s.github.io/certsuite/configuration/
 targetNameSpaces:
-  - name: ""  # Filled in automatically by the pipeline
+  - name: ""  # Set to the operator's install namespace
 
 podsUnderTestLabels:
   - "redhat-best-practices-for-k8s.com/generic: target"

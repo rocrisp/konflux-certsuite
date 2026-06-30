@@ -1,0 +1,24 @@
+apiVersion: certsuite.redhat.com/v1alpha1
+kind: TestBundle
+metadata:
+  name: ptp-operator-test-bundle
+  labels:
+    app.kubernetes.io/part-of: ptp-operator
+spec:
+  namespace: openshift-ptp
+
+  description: |
+    Software-only test deployment of ptp-operator operands. Creates a
+    PtpConfig CR that exercises the operator's reconciliation logic
+    without requiring PTP-capable NICs. The linuxptp-daemon DaemonSet
+    will be scheduled on worker nodes and the operator will process the
+    configuration, which is sufficient to verify the operator is
+    properly deployed and functioning.
+
+  readiness:
+    timeout: 300
+    checks:
+      - kind: Deployment
+        name: ptp-operator-controller-manager
+      - kind: DaemonSet
+        name: linuxptp-daemon

@@ -1,9 +1,12 @@
 # Certsuite Test Bundle Manifest
 #
 # This file describes how to deploy a software-only test version of an
-# operator's operands for certsuite testing. The manifests in operands/
-# should deploy everything needed to exercise the operator without
-# requiring specialized hardware, license keys, or external services.
+# operator's operands. The manifests in operands/ should deploy everything
+# needed to exercise the operator without requiring specialized hardware,
+# license keys, or external services.
+#
+# The test bundle is NOT responsible for certsuite configuration -- that
+# is handled separately via the CERTSUITE_CONFIG_SECRET pipeline parameter.
 apiVersion: certsuite.redhat.com/v1alpha1
 kind: TestBundle
 metadata:
@@ -21,11 +24,6 @@ spec:
     testing. Uses software-only configuration with no hardware or
     license dependencies.
 
-  # Operator identity (must match the OLM package name)
-  operator:
-    packageName: example-operator
-    channel: stable
-
   # Readiness checks -- the pipeline waits for these before running certsuite
   readiness:
     timeout: 300
@@ -34,12 +32,3 @@ spec:
         name: example-controller
       - kind: Deployment
         name: example-agent
-
-  # Certsuite configuration overrides (merged with certsuite_config.yml)
-  certsuite:
-    labels:
-      - "networking"
-      - "lifecycle"
-      - "platform-alteration"
-      - "observability"
-      - "access-control"

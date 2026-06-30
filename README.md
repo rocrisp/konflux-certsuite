@@ -89,7 +89,7 @@ Before any pipeline run the shared cluster must have:
 | `KUBECONFIG_SECRET_NAME` | yes | -- | Secret holding the shared cluster kubeconfig |
 | `KUBECONFIG_SECRET_KEY` | no | `kubeconfig` | Key inside the secret |
 | `TEST_BUNDLE_REF` | yes | -- | Git URL or OCI ref to the operator test bundle |
-| `CERTSUITE_LABELS` | yes | -- | Comma-separated certsuite labels |
+| `CERTSUITE_LABELS` | no | `""` (all) | Comma-separated certsuite labels; empty runs all tests |
 | `OADP_BACKUP_NAME` | yes | -- | OADP Backup name to restore from |
 | `OADP_NAMESPACE` | no | `openshift-adp` | Namespace of the OADP operator |
 | `PACKAGE_NAME` | no | auto-detect | OLM package name |

@@ -13,46 +13,40 @@ Usage: $(basename "$0") [OPTIONS]
 
 Generate a certsuite test bundle scaffold.
 
+The test bundle describes how to deploy your operator's operands in a
+software-only mode for certsuite testing. It does NOT include certsuite
+configuration -- that is managed separately via the pipeline's
+CERTSUITE_CONFIG_SECRET parameter.
+
 Options:
   --name NAME          Bundle name (required)
-  --package PACKAGE    OLM package name (required)
-  --channel CHANNEL    OLM channel (default: stable)
   --namespace NS       Target namespace for operands (default: auto)
   --output DIR         Output directory (default: ./certsuite-test-bundle)
-  --crd-suffix SUFFIX  CRD name suffix for certsuite config (optional)
   -h, --help           Show this help message
 EOF
 }
 
 NAME=""
-PACKAGE=""
-CHANNEL="stable"
 NAMESPACE=""
 OUTPUT="./certsuite-test-bundle"
-CRD_SUFFIX=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name)      NAME="$2"; shift 2 ;;
-    --package)   PACKAGE="$2"; shift 2 ;;
-    --channel)   CHANNEL="$2"; shift 2 ;;
     --namespace) NAMESPACE="$2"; shift 2 ;;
     --output)    OUTPUT="$2"; shift 2 ;;
-    --crd-suffix) CRD_SUFFIX="$2"; shift 2 ;;
     -h|--help)   usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 1 ;;
   esac
 done
 
-if [[ -z "${NAME}" || -z "${PACKAGE}" ]]; then
-  echo "ERROR: --name and --package are required"
+if [[ -z "${NAME}" ]]; then
+  echo "ERROR: --name is required"
   usage
   exit 1
 fi
 
 echo "Scaffolding test bundle: ${NAME}"
-echo "  Package: ${PACKAGE}"
-echo "  Channel: ${CHANNEL}"
 echo "  Output:  ${OUTPUT}"
 
 mkdir -p "${OUTPUT}/operands" "${OUTPUT}/prerequisites"
@@ -69,12 +63,8 @@ spec:
   namespace: "${NAMESPACE}"
 
   description: |
-    Software-only test deployment of ${NAME} for certsuite testing.
-    This bundle deploys operands without hardware or license dependencies.
-
-  operator:
-    packageName: ${PACKAGE}
-    channel: ${CHANNEL}
+    Software-only test deployment of ${NAME} operands.
+    Deploys without hardware or license dependencies.
 
   readiness:
     timeout: 300
@@ -82,40 +72,9 @@ spec:
       - kind: Deployment
         name: ${NAME}-controller
       # Add more readiness checks as needed
-
-  certsuite:
-    labels:
-      - "networking"
-      - "lifecycle"
-      - "platform-alteration"
-      - "observability"
-      - "access-control"
 EOF
 
-# ── certsuite_config.yml ───────────────────────────────────────────────
-CRD_BLOCK=""
-if [[ -n "${CRD_SUFFIX}" ]]; then
-  CRD_BLOCK="
-targetCrdFilters:
-  - nameSuffix: \"${CRD_SUFFIX}\"
-    scalable: false"
-fi
-
-cat > "${OUTPUT}/certsuite_config.yml" <<EOF
-# Certsuite configuration for ${NAME}
-# See: https://redhat-best-practices-for-k8s.github.io/certsuite/configuration/
-targetNameSpaces:
-  - name: ""  # Filled in by the pipeline
-
-podsUnderTestLabels:
-  - "redhat-best-practices-for-k8s.com/generic: target"
-
-operatorsUnderTestLabels:
-  - "redhat-best-practices-for-k8s.com/operator: target"
-${CRD_BLOCK}
-EOF
-
-# ── Example operand Deployment ─────────────────────────────────────────
+# ── Example operand manifest ──────────────────────────────────────────
 cat > "${OUTPUT}/operands/example-workload.yaml" <<EOF
 # TODO: Replace with your operator's actual operand CRs and workloads.
 #
@@ -124,7 +83,6 @@ cat > "${OUTPUT}/operands/example-workload.yaml" <<EOF
 # workloads, add Deployment manifests directly.
 #
 # Key requirements:
-#   - All pods must have the certsuite discovery label
 #   - Use software-only configuration (no hardware, no licenses)
 #   - Use UBI base images from registry.access.redhat.com
 apiVersion: apps/v1
@@ -133,7 +91,6 @@ metadata:
   name: ${NAME}-workload
   labels:
     app: ${NAME}-workload
-    redhat-best-practices-for-k8s.com/generic: target
 spec:
   replicas: 1
   selector:
@@ -143,7 +100,6 @@ spec:
     metadata:
       labels:
         app: ${NAME}-workload
-        redhat-best-practices-for-k8s.com/generic: target
     spec:
       containers:
         - name: app
@@ -156,13 +112,6 @@ spec:
             limits:
               cpu: 200m
               memory: 256Mi
-          securityContext:
-            runAsNonRoot: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
 EOF
 
 # ── Example prerequisite ───────────────────────────────────────────────
@@ -174,7 +123,9 @@ echo "Test bundle scaffolded at: ${OUTPUT}"
 echo ""
 echo "Next steps:"
 echo "  1. Replace operands/example-workload.yaml with your operator's CRs"
-echo "  2. Update certsuite_config.yml with your labels and CRD filters"
-echo "  3. Add any prerequisite Secrets/ConfigMaps to prerequisites/"
-echo "  4. Validate: ./tools/validate-test-bundle.sh ${OUTPUT}"
-echo "  5. Test locally against a cluster before onboarding to Konflux"
+echo "  2. Add any prerequisite Secrets/ConfigMaps to prerequisites/"
+echo "  3. Validate: ./tools/validate-test-bundle.sh ${OUTPUT}"
+echo "  4. Test locally against a cluster before onboarding to Konflux"
+echo ""
+echo "Note: Certsuite configuration (certsuite_config.yml) is managed"
+echo "separately via the CERTSUITE_CONFIG_SECRET pipeline parameter."

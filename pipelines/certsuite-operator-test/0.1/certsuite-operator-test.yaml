@@ -30,7 +30,10 @@ spec:
         operator's certsuite test bundle.
     - name: CERTSUITE_LABELS
       type: string
-      description: Comma-separated certsuite test labels (e.g. "networking,lifecycle")
+      default: ""
+      description: |
+        Comma-separated certsuite test labels (e.g. "networking,lifecycle").
+        When empty, all certsuite tests are run.
     - name: OADP_BACKUP_NAME
       type: string
       description: OADP Backup name to restore from

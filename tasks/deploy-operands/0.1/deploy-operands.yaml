@@ -112,10 +112,5 @@ spec:
           oc rollout status "deployment/${DEP}" -n "${TARGET_NS}" --timeout="${READINESS_TIMEOUT}s" || true
         done
 
-        # Copy certsuite config
-        if [[ -f "${BUNDLE_DIR}/certsuite_config.yml" ]]; then
-          cp "${BUNDLE_DIR}/certsuite_config.yml" "$(workspaces.shared.path)/certsuite_config.yml"
-        fi
-
         echo -n "${TARGET_NS}" > "$(results.operandNamespace.path)"
         echo "[$(date -u +%FT%T.%3NZ)] Operand deployment complete"

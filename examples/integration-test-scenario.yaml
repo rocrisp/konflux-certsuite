@@ -18,8 +18,9 @@ spec:
       value: "shared-cluster-kubeconfig"
     - name: TEST_BUNDLE_REF
       value: "https://github.com/<REPLACE:org>/<REPLACE:repo>.git#certsuite-test-bundle"
-    - name: CERTSUITE_LABELS
-      value: "networking,lifecycle,platform-alteration,observability,access-control"
+    # CERTSUITE_LABELS is optional. Omit or leave empty to run all tests.
+    # - name: CERTSUITE_LABELS
+    #   value: "networking,lifecycle"
     - name: OADP_BACKUP_NAME
       value: "clean-baseline-backup"
     - name: PACKAGE_NAME

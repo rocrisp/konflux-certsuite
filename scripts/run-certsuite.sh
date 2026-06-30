@@ -4,7 +4,7 @@ set -euo pipefail
 # Runs certsuite test suites against the deployed operator.
 # Iterates over comma-separated labels and runs each suite.
 
-CERTSUITE_LABELS="${CERTSUITE_LABELS:?CERTSUITE_LABELS is required}"
+CERTSUITE_LABELS="${CERTSUITE_LABELS:-}"
 CERTSUITE_CONFIG="${CERTSUITE_CONFIG:-/workspace/certsuite_config.yml}"
 RESULTS_DIR="${RESULTS_DIR:-/workspace/results}"
 CERTSUITE_IMAGE="${CERTSUITE_IMAGE:-quay.io/redhat-best-practices-for-k8s/certsuite:latest}"
@@ -16,50 +16,61 @@ if [[ ! -f "${CERTSUITE_CONFIG}" ]]; then
   exit 1
 fi
 
-echo "[$(date -u +%FT%T.%3NZ)] Running certsuite with labels: ${CERTSUITE_LABELS}"
 echo "[$(date -u +%FT%T.%3NZ)] Config: ${CERTSUITE_CONFIG}"
-
-IFS=',' read -ra LABELS <<< "${CERTSUITE_LABELS}"
 
 OVERALL_EXIT=0
 
-for LABEL in "${LABELS[@]}"; do
-  LABEL=$(echo "${LABEL}" | xargs)  # trim whitespace
-  SUITE_DIR="${RESULTS_DIR}/${LABEL}"
-  mkdir -p "${SUITE_DIR}"
+run_suite() {
+  local label="$1"
+  local suite_dir="$2"
+  mkdir -p "${suite_dir}"
 
-  echo ""
-  echo "================================================================"
-  echo "[$(date -u +%FT%T.%3NZ)] Running certsuite suite: ${LABEL}"
-  echo "================================================================"
+  local label_args=()
+  if [[ -n "${label}" ]]; then
+    label_args=(--label-filter "${label}")
+  fi
 
   set +e
   certsuite run \
-    --label-filter "${LABEL}" \
-    --output-dir "${SUITE_DIR}" \
+    "${label_args[@]}" \
+    --output-dir "${suite_dir}" \
     --config-file "${CERTSUITE_CONFIG}" \
-    2>&1 | tee "${SUITE_DIR}/certsuite.log"
-  SUITE_EXIT=$?
+    2>&1 | tee "${suite_dir}/certsuite.log"
+  local rc=$?
   set -e
 
-  if [[ ${SUITE_EXIT} -ne 0 ]]; then
-    echo "[$(date -u +%FT%T.%3NZ)] WARNING: Suite '${LABEL}' exited with code ${SUITE_EXIT}"
-    OVERALL_EXIT=1
+  if [[ -f "${suite_dir}/claim.json" ]]; then
+    local total passed failed skipped
+    total=$(jq '.claim.results | length' "${suite_dir}/claim.json" 2>/dev/null || echo "?")
+    passed=$(jq '[.claim.results[] | select(.state == "passed")] | length' "${suite_dir}/claim.json" 2>/dev/null || echo "?")
+    failed=$(jq '[.claim.results[] | select(.state == "failed")] | length' "${suite_dir}/claim.json" 2>/dev/null || echo "?")
+    skipped=$(jq '[.claim.results[] | select(.state == "skipped")] | length' "${suite_dir}/claim.json" 2>/dev/null || echo "?")
+    echo "[$(date -u +%FT%T.%3NZ)] Results: total=${total} passed=${passed} failed=${failed} skipped=${skipped}"
   else
-    echo "[$(date -u +%FT%T.%3NZ)] Suite '${LABEL}' completed successfully"
+    echo "[$(date -u +%FT%T.%3NZ)] WARNING: No claim.json generated"
   fi
 
-  # Verify claim.json was generated
-  if [[ -f "${SUITE_DIR}/claim.json" ]]; then
-    TOTAL=$(jq '.claim.results | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
-    PASSED=$(jq '[.claim.results[] | select(.state == "passed")] | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
-    FAILED=$(jq '[.claim.results[] | select(.state == "failed")] | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
-    SKIPPED=$(jq '[.claim.results[] | select(.state == "skipped")] | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
-    echo "[$(date -u +%FT%T.%3NZ)] Results: total=${TOTAL} passed=${PASSED} failed=${FAILED} skipped=${SKIPPED}"
-  else
-    echo "[$(date -u +%FT%T.%3NZ)] WARNING: No claim.json generated for suite '${LABEL}'"
-  fi
-done
+  return ${rc}
+}
+
+if [[ -z "${CERTSUITE_LABELS}" ]]; then
+  echo "[$(date -u +%FT%T.%3NZ)] Running all certsuite tests"
+  run_suite "" "${RESULTS_DIR}/all" || OVERALL_EXIT=1
+else
+  echo "[$(date -u +%FT%T.%3NZ)] Running certsuite with labels: ${CERTSUITE_LABELS}"
+  IFS=',' read -ra LABELS <<< "${CERTSUITE_LABELS}"
+
+  for LABEL in "${LABELS[@]}"; do
+    LABEL=$(echo "${LABEL}" | xargs)
+
+    echo ""
+    echo "================================================================"
+    echo "[$(date -u +%FT%T.%3NZ)] Running certsuite suite: ${LABEL}"
+    echo "================================================================"
+
+    run_suite "${LABEL}" "${RESULTS_DIR}/${LABEL}" || OVERALL_EXIT=1
+  done
+fi
 
 echo ""
 echo "[$(date -u +%FT%T.%3NZ)] All suites complete. Overall exit code: ${OVERALL_EXIT}"

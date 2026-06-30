@@ -79,14 +79,6 @@ for SS in ${STATEFULSETS}; do
   fi
 done
 
-# Copy certsuite config if present
-if [[ -f "${BUNDLE_DIR}/certsuite_config.yml" ]]; then
-  echo "[$(date -u +%FT%T.%3NZ)] Found certsuite_config.yml in test bundle"
-  cp "${BUNDLE_DIR}/certsuite_config.yml" /workspace/certsuite_config.yml
-else
-  echo "[$(date -u +%FT%T.%3NZ)] WARNING: No certsuite_config.yml found in test bundle"
-fi
-
 # Store target namespace for downstream
 echo -n "${TARGET_NS}" > /workspace/operand-namespace
 

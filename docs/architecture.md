@@ -141,12 +141,13 @@ install/operand namespaces. OADP restore then handles any remaining drift.
 
 The test bundle is a directory (hosted in a git repo or OCI image) that
 operator owners create. It tells the pipeline how to deploy operands in
-a software-only mode suitable for certsuite testing.
+a software-only mode and verify the operator is properly deployed. The
+bundle is **not** responsible for certsuite configuration -- that is
+managed separately via the `CERTSUITE_CONFIG_SECRET` pipeline parameter.
 
 ```
 my-operator-test-bundle/
   certsuite-test-bundle.yaml    # Bundle metadata (namespace, readiness, etc.)
-  certsuite_config.yml          # Certsuite configuration for this operator
   prerequisites/                # (optional) Secrets, ConfigMaps needed first
     secret.yaml
   operands/                     # Kubernetes manifests for operand instances
@@ -156,9 +157,13 @@ my-operator-test-bundle/
 ```
 
 The bundle is fetched by the `deploy-operands` task using the
-`TEST_BUNDLE_REF` pipeline parameter. See the
-[Operator Onboarding Guide](operator-onboarding-guide.md) for how to
-create one.
+`TEST_BUNDLE_REF` pipeline parameter. By default, the pipeline runs
+**all** certsuite tests. Pass `CERTSUITE_LABELS` to run only a subset.
+
+See the [Operator Onboarding Guide](operator-onboarding-guide.md) for
+how to create a bundle, and the
+[ptp-operator example](../examples/ptp-operator-test-bundle/) for a
+real-world reference.
 
 ## Results Flow
 

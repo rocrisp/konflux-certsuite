@@ -12,7 +12,10 @@ spec:
   params:
     - name: CERTSUITE_LABELS
       type: string
-      description: Comma-separated certsuite test labels (e.g. "networking,lifecycle")
+      default: ""
+      description: |
+        Comma-separated certsuite test labels (e.g. "networking,lifecycle").
+        When empty, all certsuite tests are run in a single invocation.
     - name: CERTSUITE_IMAGE
       type: string
       default: "quay.io/redhat-best-practices-for-k8s/certsuite:latest"
@@ -47,32 +50,25 @@ spec:
           exit 1
         fi
 
-        IFS=',' read -ra LABELS <<< "${CERTSUITE_LABELS}"
         OVERALL_EXIT=0
 
-        for LABEL in "${LABELS[@]}"; do
-          LABEL=$(echo "${LABEL}" | xargs)
-          SUITE_DIR="${RESULTS_DIR}/${LABEL}"
+        if [[ -z "${CERTSUITE_LABELS}" ]]; then
+          # Run all tests in a single invocation
+          SUITE_DIR="${RESULTS_DIR}/all"
           mkdir -p "${SUITE_DIR}"
 
           echo ""
           echo "================================================================"
-          echo "[$(date -u +%FT%T.%3NZ)] Running: ${LABEL}"
+          echo "[$(date -u +%FT%T.%3NZ)] Running: all certsuite tests"
           echo "================================================================"
 
           set +e
           certsuite run \
-            --label-filter "${LABEL}" \
             --output-dir "${SUITE_DIR}" \
             --config-file "${CONFIG_FILE}" \
             2>&1 | tee "${SUITE_DIR}/certsuite.log"
-          RC=$?
+          OVERALL_EXIT=$?
           set -e
-
-          if [[ ${RC} -ne 0 ]]; then
-            echo "[$(date -u +%FT%T.%3NZ)] WARNING: '${LABEL}' exit code ${RC}"
-            OVERALL_EXIT=1
-          fi
 
           if [[ -f "${SUITE_DIR}/claim.json" ]]; then
             TOTAL=$(jq '.claim.results | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
@@ -80,7 +76,41 @@ spec:
             FAILED=$(jq '[.claim.results[] | select(.state == "failed")] | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
             echo "[$(date -u +%FT%T.%3NZ)] total=${TOTAL} passed=${PASSED} failed=${FAILED}"
           fi
-        done
+        else
+          IFS=',' read -ra LABELS <<< "${CERTSUITE_LABELS}"
+
+          for LABEL in "${LABELS[@]}"; do
+            LABEL=$(echo "${LABEL}" | xargs)
+            SUITE_DIR="${RESULTS_DIR}/${LABEL}"
+            mkdir -p "${SUITE_DIR}"
+
+            echo ""
+            echo "================================================================"
+            echo "[$(date -u +%FT%T.%3NZ)] Running: ${LABEL}"
+            echo "================================================================"
+
+            set +e
+            certsuite run \
+              --label-filter "${LABEL}" \
+              --output-dir "${SUITE_DIR}" \
+              --config-file "${CONFIG_FILE}" \
+              2>&1 | tee "${SUITE_DIR}/certsuite.log"
+            RC=$?
+            set -e
+
+            if [[ ${RC} -ne 0 ]]; then
+              echo "[$(date -u +%FT%T.%3NZ)] WARNING: '${LABEL}' exit code ${RC}"
+              OVERALL_EXIT=1
+            fi
+
+            if [[ -f "${SUITE_DIR}/claim.json" ]]; then
+              TOTAL=$(jq '.claim.results | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
+              PASSED=$(jq '[.claim.results[] | select(.state == "passed")] | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
+              FAILED=$(jq '[.claim.results[] | select(.state == "failed")] | length' "${SUITE_DIR}/claim.json" 2>/dev/null || echo "?")
+              echo "[$(date -u +%FT%T.%3NZ)] total=${TOTAL} passed=${PASSED} failed=${FAILED}"
+            fi
+          done
+        fi
 
         echo "[$(date -u +%FT%T.%3NZ)] All suites complete (exit: ${OVERALL_EXIT})"
         exit ${OVERALL_EXIT}
