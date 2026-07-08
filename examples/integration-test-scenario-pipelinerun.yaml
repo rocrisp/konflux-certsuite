@@ -1,0 +1,28 @@
+# Example IntegrationTestScenario for the certsuite-operator-test pipeline
+# using "Pipeline Run" mode. This mode uses a complete PipelineRun definition
+# that includes workspace bindings, which solves the workspace binding issue
+# when the Konflux UI doesn't expose workspace configuration.
+#
+# Copy this file into your Konflux tenants-config repository and update
+# the values marked with <REPLACE>.
+apiVersion: appstudio.redhat.com/v1beta2
+kind: IntegrationTestScenario
+metadata:
+  labels:
+    test.appstudio.openshift.io/optional: "false"
+  name: certsuite-operator-test
+  namespace: <REPLACE:tenant-namespace>
+spec:
+  application: <REPLACE:application-name>
+  contexts:
+    - description: Certsuite testing for the FBC component
+      name: component_<REPLACE:component-name>
+  resolverRef:
+    resolver: git
+    params:
+      - name: url
+        value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+      - name: revision
+        value: main
+      - name: pathInRepo
+        value: examples/integration-test-pipelinerun.yaml

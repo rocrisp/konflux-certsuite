@@ -1,0 +1,60 @@
+# Example PipelineRun for the certsuite-operator-test pipeline.
+# Use this with IntegrationTestScenario in "Pipeline Run" mode.
+# Copy this file into your Konflux tenants-config repository and update
+# the values marked with <REPLACE>.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: certsuite-operator-test-run
+  labels:
+    test.appstudio.openshift.io/optional: "true"
+  annotations:
+    # Konflux will substitute the actual snapshot
+    appstudio.openshift.io/snapshot: "{{SNAPSHOT}}"
+spec:
+  pipelineRef:
+    resolver: git
+    params:
+      - name: url
+        value: https://github.com/redhat-best-practices-for-k8s/konflux-certsuite.git
+      - name: revision
+        value: main
+      - name: pathInRepo
+        value: pipelines/certsuite-operator-test/0.1/certsuite-operator-test.yaml
+  params:
+    # Konflux will inject this parameter
+    - name: SNAPSHOT
+      value: "{{SNAPSHOT}}"
+    - name: KUBECONFIG_SECRET_NAME
+      value: "shared-cluster-kubeconfig"
+    # For testing with a custom cluster, set KUBECONFIG_VALUE instead:
+    # - name: KUBECONFIG_VALUE
+    #   value: "<base64-encoded-kubeconfig>"
+    - name: TEST_BUNDLE_REF
+      value: "https://github.com/<REPLACE:org>/<REPLACE:repo>.git#certsuite-test-bundle"
+    # CERTSUITE_LABELS is optional. Omit or leave empty to run all tests.
+    # - name: CERTSUITE_LABELS
+    #   value: "networking,lifecycle"
+    - name: OADP_BACKUP_NAME
+      value: "clean-baseline-backup"
+    - name: PACKAGE_NAME
+      value: ""
+    - name: CHANNEL_NAME
+      value: ""
+    - name: CREDENTIALS_SECRET_NAME
+      value: "quay-dockerconfig"
+    - name: OCI_REF
+      value: "quay.io/<REPLACE:org>/certsuite-results:latest"
+    - name: CERT_TRACK_URL
+      value: "https://cert-track-results.example.com"
+    - name: CERT_TRACK_SECRET_NAME
+      value: "cert-track-api-token"
+  workspaces:
+    - name: shared
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
