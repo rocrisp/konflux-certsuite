@@ -47,3 +47,12 @@ spec:
         value: main
       - name: pathInRepo
         value: pipelines/certsuite-operator-test/0.1/certsuite-operator-test.yaml
+  workspaces:
+    - name: shared
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
