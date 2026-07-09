@@ -153,10 +153,6 @@ spec:
     - name: get-unreleased-bundle
       runAfter:
         - parse-metadata
-      when:
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: ["push", "Push"]
       taskSpec:
         results:
           - name: unreleasedBundle
@@ -197,9 +193,6 @@ spec:
         - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
           operator: notin
           values: [""]
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: ["push", "Push"]
       taskRef:
         resolver: git
         params:
@@ -226,9 +219,9 @@ spec:
       runAfter:
         - acquire-cluster-lock
       when:
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: ["push", "Push"]
+        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+          operator: notin
+          values: [""]
         - input: "$(params.OADP_BACKUP_NAME)"
           operator: notin
           values: [""]
@@ -265,9 +258,6 @@ spec:
         - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
           operator: notin
           values: [""]
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: ["push", "Push"]
       params:
         - name: kubeconfigSecretName
           value: $(params.KUBECONFIG_SECRET_NAME)
@@ -790,9 +780,9 @@ spec:
         - name: OPERAND_NAMESPACE
           value: "$(tasks.deploy-and-test.results.operandNamespace)"
       when:
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: ["push", "Push"]
+        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+          operator: notin
+          values: [""]
 
     # ── OADP Restore (post-test cleanup) ─────────────────────────────────
     - name: oadp-restore-post
@@ -817,9 +807,9 @@ spec:
         - name: RESTORE_SUFFIX
           value: "post-$(context.pipelineRun.uid)"
       when:
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: ["push", "Push"]
+        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+          operator: notin
+          values: [""]
         - input: "$(params.OADP_BACKUP_NAME)"
           operator: notin
           values: [""]
