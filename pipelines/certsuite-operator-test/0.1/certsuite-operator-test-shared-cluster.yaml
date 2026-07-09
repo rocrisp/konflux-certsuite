@@ -159,9 +159,16 @@ spec:
           value: $(params.KUBECONFIG_VALUE)
 
     # ── 2. Get Unreleased Bundle from FBC ────────────────────────────────
+    #   Skipped when BUNDLE_IMAGE is set directly — opm cannot authenticate
+    #   to registry.redhat.io in the restricted container environment, so
+    #   running this step when a bundle is already known would always fail.
     - name: get-unreleased-bundle
       runAfter:
         - parse-metadata
+      when:
+        - input: "$(params.BUNDLE_IMAGE)"
+          operator: in
+          values: [""]
       taskSpec:
         results:
           - name: unreleasedBundle
