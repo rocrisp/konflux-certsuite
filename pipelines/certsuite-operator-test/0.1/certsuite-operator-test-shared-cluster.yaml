@@ -165,6 +165,7 @@ spec:
       taskSpec:
         results:
           - name: unreleasedBundle
+            value: "$(steps.get-bundle.results.unreleasedBundle)"
           - name: packageName
             value: "$(steps.get-bundle.results.packageName)"
           - name: channelName
@@ -193,6 +194,20 @@ spec:
                 value: $(params.PACKAGE_NAME)
               - name: channelName
                 value: $(params.CHANNEL_NAME)
+          - name: ensure-bundle-result
+            image: quay.io/openshift/origin-cli:latest
+            script: |
+              #!/usr/bin/env bash
+              # Guarantee unreleasedBundle task result is always written so
+              # downstream tasks that reference it are never blocked by a
+              # missing result file.
+              RESULT_FILE="$(results.unreleasedBundle.path)"
+              if [[ ! -f "${RESULT_FILE}" ]]; then
+                echo -n "" > "${RESULT_FILE}"
+                echo "[$(date -u +%FT%T.%3NZ)] No unreleased bundle found - writing empty result"
+              else
+                echo "[$(date -u +%FT%T.%3NZ)] Unreleased bundle: $(cat ${RESULT_FILE})"
+              fi
 
     # ── 2b. Resolve effective bundle image ───────────────────────────────
     #   Picks BUNDLE_IMAGE param if set, else uses the unreleased bundle
