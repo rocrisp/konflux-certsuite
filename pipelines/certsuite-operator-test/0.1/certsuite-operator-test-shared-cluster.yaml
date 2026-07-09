@@ -60,6 +60,15 @@ spec:
     - name: OADP_NAMESPACE
       type: string
       default: "openshift-adp"
+    - name: BUNDLE_IMAGE
+      type: string
+      default: ""
+      description: |
+        Optional. When set, skips FBC bundle discovery and deploys this
+        specific bundle image directly. Useful for shared cluster testing
+        where the bundle may already be in the official catalog.
+        When empty, the pipeline discovers the unreleased bundle from the
+        FBC fragment automatically.
     - name: PACKAGE_NAME
       type: string
       default: ""
@@ -185,12 +194,86 @@ spec:
               - name: channelName
                 value: $(params.CHANNEL_NAME)
 
+    # ── 2b. Resolve effective bundle image ───────────────────────────────
+    #   Picks BUNDLE_IMAGE param if set, else uses the unreleased bundle
+    #   found by get-unreleased-bundle. This allows the pipeline to work
+    #   both for released bundles (shared cluster testing) and unreleased
+    #   bundles (FBC release workflow).
+    - name: resolve-bundle
+      runAfter:
+        - get-unreleased-bundle
+      taskSpec:
+        params:
+          - name: bundleImageParam
+            type: string
+          - name: unreleasedBundle
+            type: string
+          - name: packageNameParam
+            type: string
+          - name: packageNameFromFBC
+            type: string
+          - name: channelNameParam
+            type: string
+          - name: channelNameFromFBC
+            type: string
+        results:
+          - name: bundleImage
+          - name: packageName
+          - name: channelName
+        steps:
+          - name: resolve
+            image: quay.io/openshift/origin-cli:latest
+            env:
+              - name: BUNDLE_IMAGE_PARAM
+                value: "$(params.bundleImageParam)"
+              - name: UNRELEASED_BUNDLE
+                value: "$(params.unreleasedBundle)"
+              - name: PACKAGE_NAME_PARAM
+                value: "$(params.packageNameParam)"
+              - name: PACKAGE_NAME_FBC
+                value: "$(params.packageNameFromFBC)"
+              - name: CHANNEL_NAME_PARAM
+                value: "$(params.channelNameParam)"
+              - name: CHANNEL_NAME_FBC
+                value: "$(params.channelNameFromFBC)"
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              if [[ -n "${BUNDLE_IMAGE_PARAM}" ]]; then
+                echo "[$(date -u +%FT%T.%3NZ)] Using explicit BUNDLE_IMAGE param"
+                echo -n "${BUNDLE_IMAGE_PARAM}" > $(results.bundleImage.path)
+                echo -n "${PACKAGE_NAME_PARAM}" > $(results.packageName.path)
+                echo -n "${CHANNEL_NAME_PARAM}" > $(results.channelName.path)
+              elif [[ -n "${UNRELEASED_BUNDLE}" ]]; then
+                echo "[$(date -u +%FT%T.%3NZ)] Using unreleased bundle from FBC"
+                echo -n "${UNRELEASED_BUNDLE}" > $(results.bundleImage.path)
+                echo -n "${PACKAGE_NAME_FBC}" > $(results.packageName.path)
+                echo -n "${CHANNEL_NAME_FBC}" > $(results.channelName.path)
+              else
+                echo "ERROR: No bundle image available. Set BUNDLE_IMAGE or ensure FBC contains an unreleased bundle." >&2
+                exit 1
+              fi
+      params:
+        - name: bundleImageParam
+          value: $(params.BUNDLE_IMAGE)
+        - name: unreleasedBundle
+          value: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+        - name: packageNameParam
+          value: $(params.PACKAGE_NAME)
+        - name: packageNameFromFBC
+          value: "$(tasks.get-unreleased-bundle.results.packageName)"
+        - name: channelNameParam
+          value: $(params.CHANNEL_NAME)
+        - name: channelNameFromFBC
+          value: "$(tasks.get-unreleased-bundle.results.channelName)"
+
     # ── 3. Acquire Cluster Lock ──────────────────────────────────────────
     - name: acquire-cluster-lock
       runAfter:
-        - get-unreleased-bundle
+        - resolve-bundle
       when:
-        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+        - input: "$(tasks.resolve-bundle.results.bundleImage)"
           operator: notin
           values: [""]
       taskRef:
@@ -219,7 +302,7 @@ spec:
       runAfter:
         - acquire-cluster-lock
       when:
-        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+        - input: "$(tasks.resolve-bundle.results.bundleImage)"
           operator: notin
           values: [""]
         - input: "$(params.OADP_BACKUP_NAME)"
@@ -255,7 +338,7 @@ spec:
       runAfter:
         - acquire-cluster-lock
       when:
-        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+        - input: "$(tasks.resolve-bundle.results.bundleImage)"
           operator: notin
           values: [""]
       params:
@@ -266,11 +349,11 @@ spec:
         - name: fbcFragment
           value: "$(tasks.parse-metadata.results.component-container-image)"
         - name: bundleImage
-          value: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+          value: "$(tasks.resolve-bundle.results.bundleImage)"
         - name: packageName
-          value: "$(tasks.get-unreleased-bundle.results.packageName)"
+          value: "$(tasks.resolve-bundle.results.packageName)"
         - name: channelName
-          value: "$(tasks.get-unreleased-bundle.results.channelName)"
+          value: "$(tasks.resolve-bundle.results.channelName)"
         - name: testBundleRef
           value: $(params.TEST_BUNDLE_REF)
         - name: certsuiteLabels
@@ -284,7 +367,7 @@ spec:
         - name: releaseVersion
           value: "$(tasks.parse-metadata.results.source-git-revision)"
         - name: operatorName
-          value: "$(tasks.get-unreleased-bundle.results.packageName)"
+          value: "$(tasks.resolve-bundle.results.packageName)"
         - name: ociRef
           value: $(params.OCI_REF)
         - name: credentialsSecretName
@@ -780,7 +863,7 @@ spec:
         - name: OPERAND_NAMESPACE
           value: "$(tasks.deploy-and-test.results.operandNamespace)"
       when:
-        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+        - input: "$(tasks.resolve-bundle.results.bundleImage)"
           operator: notin
           values: [""]
 
@@ -807,7 +890,7 @@ spec:
         - name: RESTORE_SUFFIX
           value: "post-$(context.pipelineRun.uid)"
       when:
-        - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+        - input: "$(tasks.resolve-bundle.results.bundleImage)"
           operator: notin
           values: [""]
         - input: "$(params.OADP_BACKUP_NAME)"

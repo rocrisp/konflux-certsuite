@@ -16,6 +16,15 @@ spec:
   params:
     - name: KUBECONFIG_SECRET_NAME
       value: "shared-cluster-kubeconfig"
+    # Set BUNDLE_IMAGE to bypass FBC bundle discovery and deploy a specific
+    # bundle directly. Useful when the bundle is already in the official catalog.
+    # - name: BUNDLE_IMAGE
+    #   value: "registry.redhat.io/<org>/<bundle>@sha256:<digest>"
+    # When BUNDLE_IMAGE is set, also provide package and channel:
+    # - name: PACKAGE_NAME
+    #   value: "<operator-package-name>"
+    # - name: CHANNEL_NAME
+    #   value: "<channel>"
     # For testing with a custom cluster, set KUBECONFIG_VALUE instead:
     # - name: KUBECONFIG_VALUE
     #   value: "<base64-encoded-kubeconfig>"
