@@ -222,8 +222,6 @@ spec:
     #   both for released bundles (shared cluster testing) and unreleased
     #   bundles (FBC release workflow).
     - name: resolve-bundle
-      runAfter:
-        - get-unreleased-bundle
       taskSpec:
         params:
           - name: bundleImageParam
